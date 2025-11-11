@@ -4,6 +4,7 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <charconv>
 #include <chrono>
 #include <cstdio>
 #include <cstddef>
@@ -395,6 +396,21 @@ static uint64_t CyclesToMilliseconds(uint64_t Cycles) {
   return Cycles_f / CyclesPerMillisecond;
 }
 
+static std::string CustomPrintInteger(uint64_t Integer) {
+  // Maximum integer that can fit in to uint64_t, plus commas, plus null
+  char buf[27] {};
+  auto result = std::to_chars(buf, buf + sizeof(buf), Integer, 10);
+
+  const auto size = result.ptr - buf;
+  for (ssize_t i = size - 3; i > 0; i -= 3) {
+    const auto remaining_size = size - i;
+    memmove(&buf[i + 1], &buf[i], remaining_size + 1);
+    buf[i] = ',';
+  }
+
+  return std::string(buf);
+}
+
 static void SampleStats(std::chrono::steady_clock::time_point Now) {
   auto AtomicCopyStats = [](FEXCore::Profiler::ThreadStats* Dest, FEXCore::Profiler::ThreadStats* Src, size_t Size) {
     // Take advantage of 16-byte alignment and single-copy atomicity of ARMv8.4.
@@ -655,7 +671,7 @@ int main(int argc, char** argv) {
       const double AccumulatedJITCount_Per_Second = AccumulatedJITCount_l * (SamplePeriodNanoseconds / NanosecondsInSeconds);
       mvprintw(LINES - 20 - HistogramHeight, 0, "     SIGBUS Cnt: %ld (%lf per second)\n", SIGBUSCount, SIGBUS_Per_Second);
       mvprintw(LINES - 19 - HistogramHeight, 0, "        SMC Cnt: %ld\n", SMCCount);
-      mvprintw(LINES - 18 - HistogramHeight, 0, "  Softfloat Cnt: %ld\n", FloatFallbackCount);
+      mvprintw(LINES - 18 - HistogramHeight, 0, "  Softfloat Cnt: %s\n", CustomPrintInteger(FloatFallbackCount).c_str());
       mvprintw(LINES - 17 - HistogramHeight, 0, "  CacheMiss Cnt: %ld (%lf per second)\n", AccumulatedCacheMissCount, AccumulatedCacheMissCount_Per_Second);
       mvprintw(LINES - 16 - HistogramHeight, 0, "    $RDLck Time: %f %s (%.2f percent)\n", AccumulatedCacheReadLockTime * Scale, ScaleStr,
                AccumulatedCacheReadLockTime / (double)MaxActiveThreads * 100.0);
