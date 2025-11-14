@@ -548,6 +548,7 @@ int main(int argc, char** argv) {
     uint64_t total_jit_time {};
     size_t threads_sampled {};
     std::vector<uint64_t> hottest_threads;
+    uint64_t TotalJITInvocations {};
 #define accumulate(dest, name) dest += Stat->name - PreviousStats->name
     for (auto it = g_stats.sampled_stats.begin(); it != g_stats.sampled_stats.end();) {
       ++threads_sampled;
@@ -569,6 +570,7 @@ int main(int argc, char** argv) {
       accumulate(TotalThisPeriod.AccumulatedCacheReadLockTime, AccumulatedCacheReadLockTime);
       accumulate(TotalThisPeriod.AccumulatedCacheWriteLockTime, AccumulatedCacheWriteLockTime);
       accumulate(TotalThisPeriod.AccumulatedJITCount, AccumulatedJITCount);
+      TotalJITInvocations += Stat->AccumulatedJITCount;
 
       memcpy(PreviousStats, Stat, g_stats.thread_stats_size_to_copy);
 
@@ -672,7 +674,7 @@ int main(int argc, char** argv) {
       mvprintw(LINES - 20 - HistogramHeight, 0, "     SIGBUS Cnt: %ld (%lf per second)\n", SIGBUSCount, SIGBUS_Per_Second);
       mvprintw(LINES - 19 - HistogramHeight, 0, "        SMC Cnt: %ld\n", SMCCount);
       mvprintw(LINES - 18 - HistogramHeight, 0, "  Softfloat Cnt: %s\n", CustomPrintInteger(FloatFallbackCount).c_str());
-      mvprintw(LINES - 17 - HistogramHeight, 0, "  CacheMiss Cnt: %ld (%lf per second)\n", AccumulatedCacheMissCount, AccumulatedCacheMissCount_Per_Second);
+      mvprintw(LINES - 17 - HistogramHeight, 0, "  CacheMiss Cnt: %ld (%lf per second) (%s total JIT invocations)\n", AccumulatedCacheMissCount, AccumulatedCacheMissCount_Per_Second, CustomPrintInteger(TotalJITInvocations).c_str());
       mvprintw(LINES - 16 - HistogramHeight, 0, "    $RDLck Time: %f %s (%.2f percent)\n", AccumulatedCacheReadLockTime * Scale, ScaleStr,
                AccumulatedCacheReadLockTime / (double)MaxActiveThreads * 100.0);
       mvprintw(LINES - 15 - HistogramHeight, 0, "    $WRLck Time: %f %s (%.2f percent)\n", AccumulatedCacheWriteLockTime * Scale, ScaleStr,
