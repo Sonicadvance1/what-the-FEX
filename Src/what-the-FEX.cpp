@@ -435,6 +435,7 @@ void HandleHistogram(WINDOW *win, void* user_data) {
   }
 
   box(win, 0, 0);
+  mvwprintw(win, 0, 0, "► Total JIT usage");
 }
 
 void HandleMemstats(WINDOW *win, void* user_data) {
@@ -487,6 +488,7 @@ void HandleMemstats(WINDOW *win, void* user_data) {
   }
 
   box(win, 0, 0);
+  mvwprintw(win, 0, 0, "► FEX Memory Usage");
 }
 
 struct JITStatsUserData {
@@ -594,6 +596,7 @@ void HandleJITstats(WINDOW *win, void* user_data) {
   mvwprintw(win, win_height - 2, 1,  "FEX JIT Load:    %f (cycles: %ld)\n", JITData->fex_load, total_jit_time);
 
   box(win, 0, 0);
+  mvwprintw(win, 0, 0, "► FEX JIT Stats");
 
   // <Box> + <Lines of text> + <Thread stats> + <Top %d threads executing text>
   const int Height = 2 + 11 + MaxActiveThreads + 1;
