@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
-// clang++ -static -fuse-ld=lld -g -o fex_shm_stats_read fex_shm_stats_read.cpp -std=c++20 `pkgconf --libs --static ncursesw`
+#include "StatsAccumulation.hpp"
+#include "WindowStack.hpp"
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -30,61 +32,6 @@
 #include <immintrin.h>
 #endif
 
-// Reimplementation of FEXCore::Profiler struct types.
-namespace FEXCore::Profiler {
-constexpr uint32_t STATS_VERSION = 2;
-enum class AppType : uint8_t {
-  LINUX_32,
-  LINUX_64,
-  WIN_ARM64EC,
-  WIN_WOW64,
-};
-
-struct ThreadStatsHeader {
-  uint8_t Version;
-  AppType app_type;
-  uint16_t ThreadStatsSize;
-  char fex_version[48];
-  std::atomic<uint32_t> Head;
-  std::atomic<uint32_t> Size;
-  uint32_t pad;
-};
-
-struct ThreadStats {
-  uint32_t Next;
-  uint32_t TID;
-
-  // Accumulated time
-  uint64_t AccumulatedJITTime;
-  uint64_t AccumulatedSignalTime;
-
-  // Accumulated event counts
-  uint64_t SIGBUSCount;
-  uint64_t SMCCount;
-  uint64_t FloatFallbackCount;
-
-  uint64_t AccumulatedCacheMissCount;
-  uint64_t AccumulatedCacheReadLockTime;
-  uint64_t AccumulatedCacheWriteLockTime;
-
-  uint64_t AccumulatedJITCount;
-};
-static_assert(sizeof(ThreadStats) % 16 == 0);
-} // namespace FEXCore::Profiler
-
-static const char* GetAppType(FEXCore::Profiler::AppType Type) {
-  switch (Type) {
-  case FEXCore::Profiler::AppType::LINUX_32: return "Linux32";
-  case FEXCore::Profiler::AppType::LINUX_64: return "Linux64";
-  case FEXCore::Profiler::AppType::WIN_ARM64EC: return "arm64ec";
-  case FEXCore::Profiler::AppType::WIN_WOW64: return "wow64";
-  default: break;
-  }
-
-  return "Unknown";
-}
-
-
 static const std::array<wchar_t, 10> partial_pips {
   L'\U00002002', // 0%: Empty
   L'\U00002581', // 10%: 1/8 (12.5%)
@@ -97,6 +44,8 @@ static const std::array<wchar_t, 10> partial_pips {
   L'\U00002587', // 80%: 7/8 (87.5%)
   L'\U00002588', // Full
 };
+
+constexpr double NanosecondsInSeconds = 1'000'000'000.0;
 
 struct fex_stats {
   const char *pid_str {};
@@ -112,6 +61,8 @@ struct fex_stats {
   void* shm_base {};
   FEXCore::Profiler::ThreadStatsHeader* head {};
   size_t thread_stats_size_to_copy {};
+
+  WTF::WinStack WinStackMgr;
 
   struct retained_stats {
     std::chrono::time_point<std::chrono::steady_clock> LastSeen;
@@ -442,6 +393,248 @@ static void SampleStats(std::chrono::steady_clock::time_point Now) {
   }
 }
 
+void HandleHistogram(WINDOW *win, void* user_data) {
+  const auto win_height = getmaxy(win);
+  const auto win_width = getmaxx(win);
+
+  const auto HistogramHeight = win_height - 2;
+  size_t HistogramWidth = win_width - 2;
+  HistogramWidth = std::min(HistogramWidth, g_stats.fex_load_histogram.size());
+
+  size_t j = 0;
+
+  for (auto& HistogramResult : std::ranges::reverse_view {g_stats.fex_load_histogram}) {
+    for (size_t i = 0; i < HistogramHeight; ++i) {
+      int attr = 0;
+      if (HistogramResult >= 75.0) {
+        attr = 1;
+      } else if (HistogramResult >= 50.0) {
+        attr = 2;
+      }
+      if (attr) {
+        wattron(win, COLOR_PAIR(attr));
+      }
+
+      double rounded_down = std::floor(HistogramResult / 10.0) * 10.0;
+      size_t tens_digit = rounded_down / 10.0;
+      size_t digit_percent = std::floor(HistogramResult - rounded_down);
+
+      size_t pip = 0;
+      if (tens_digit > i) {
+        pip = partial_pips.size() - 1;
+      } else if (tens_digit == i) {
+        pip = digit_percent;
+      }
+
+      mvwprintw(win, HistogramHeight - i, win_width - j - 2, "%lc", partial_pips[pip]);
+      if (attr) {
+        wattroff(win, COLOR_PAIR(attr));
+      }
+    }
+    ++j;
+  }
+
+  box(win, 0, 0);
+}
+
+void HandleMemstats(WINDOW *win, void* user_data) {
+  const uint64_t MemBytes = g_stats.MemStats.TotalAnon.load();
+  const uint64_t MemBytesJIT = g_stats.MemStats.JITCode.load();
+  const uint64_t MemBytesOpDispatcher = g_stats.MemStats.OpDispatcher.load();
+  const uint64_t MemBytesFrontend = g_stats.MemStats.Frontend.load();
+  const uint64_t MemBytesCPUBackend = g_stats.MemStats.CPUBackend.load();
+  const uint64_t MemBytesLookup = g_stats.MemStats.Lookup.load();
+  const uint64_t MemBytesLookupL1 = g_stats.MemStats.LookupL1.load();
+  const uint64_t MemBytesThreadStates = g_stats.MemStats.ThreadStates.load();
+  const uint64_t MemBytesBlockLinks = g_stats.MemStats.BlockLinks.load();
+  const uint64_t MemBytesMisc = g_stats.MemStats.Misc.load();
+  const uint64_t MemBytesJEMalloc = g_stats.MemStats.JEMalloc.load();
+  const uint64_t MemBytesUnaccounted = g_stats.MemStats.Unaccounted.load();
+
+  constexpr static size_t TotalMemLines = 11;
+
+  if (MemBytes == ~0ULL) {
+    mvwprintw(win, 1, 1, "Total FEX Anon memory resident: Couldn't detect\n");
+  } else {
+    std::string SizeHuman = ConvertMemToHuman(MemBytes);
+    std::string SizeHumanJIT = ConvertMemToHuman(MemBytesJIT);
+    std::string SizeHumanOpDispatcher = ConvertMemToHuman(MemBytesOpDispatcher);
+    std::string SizeHumanFrontend = ConvertMemToHuman(MemBytesFrontend);
+    std::string SizeHumanCPUBackend = ConvertMemToHuman(MemBytesCPUBackend);
+    std::string SizeHumanLookup = ConvertMemToHuman(MemBytesLookup);
+    std::string SizeHumanLookupL1 = ConvertMemToHuman(MemBytesLookupL1);
+    std::string SizeHumanThreadStates = ConvertMemToHuman(MemBytesThreadStates);
+    std::string SizeHumanBlockLinks = ConvertMemToHuman(MemBytesBlockLinks);
+    std::string SizeHumanMisc = ConvertMemToHuman(MemBytesMisc);
+    std::string SizeHumanJEMalloc = ConvertMemToHuman(MemBytesJEMalloc);
+    std::string SizeHumanUnaccounted = ConvertMemToHuman(MemBytesUnaccounted);
+    std::string SizeHumanLargestUnaccounted = ConvertMemToHuman(g_stats.MemStats.LargestAnon.Size);
+
+    mvwprintw(win, 1, 1,  "Total FEX Anon memory resident: %s\n", SizeHuman.c_str());
+    mvwprintw(win, 2, 1,  "    JIT resident:             %s\n", SizeHumanJIT.c_str());
+    mvwprintw(win, 3, 1,  "    OpDispatcher resident:    %s\n", SizeHumanOpDispatcher.c_str());
+    mvwprintw(win, 4, 1,  "    Frontend resident:        %s\n", SizeHumanFrontend.c_str());
+    mvwprintw(win, 5, 1,  "    CPUBackend resident:      %s\n", SizeHumanCPUBackend.c_str());
+    mvwprintw(win, 6, 1,  "    Lookup cache resident:    %s\n", SizeHumanLookup.c_str());
+    mvwprintw(win, 7, 1,  "    Lookup L1 cache resident: %s\n", SizeHumanLookupL1.c_str());
+    mvwprintw(win, 8, 1,  "    ThreadStates resident:    %s\n", SizeHumanThreadStates.c_str());
+    mvwprintw(win, 9, 1,  "    BlockLinks resident:      %s\n", SizeHumanBlockLinks.c_str());
+    mvwprintw(win, 10, 1,  "          Misc resident:      %s\n", SizeHumanMisc.c_str());
+    mvwprintw(win, 11, 1, "    JEMalloc resident:        %s\n", SizeHumanJEMalloc.c_str());
+    mvwprintw(win, 12, 1, "    Unaccounted resident:     %s\n", SizeHumanUnaccounted.c_str());
+    mvwprintw(win, 13, 1, "                 Largest:     %s [0x%lx, 0x%lx) - p (void*) memset(0x%lx, 0xFF, %ld)\n",
+        SizeHumanLargestUnaccounted.c_str(), g_stats.MemStats.LargestAnon.Begin, g_stats.MemStats.LargestAnon.End, g_stats.MemStats.LargestAnon.Begin, g_stats.MemStats.LargestAnon.End - g_stats.MemStats.LargestAnon.Begin);
+  }
+
+  box(win, 0, 0);
+}
+
+struct JITStatsUserData {
+  FEXCore::Profiler::ThreadStats TotalThisPeriod;
+  std::vector<uint64_t> hottest_threads;
+  std::chrono::nanoseconds sample_period;
+  size_t threads_sampled {};
+  uint64_t total_jit_time {};
+  uint64_t TotalJITInvocations {};
+  double fex_load {};
+  double Scale = 1000.0;
+  const char* ScaleStr = "ms/second";
+};
+
+void HandleJITstats(WINDOW *win, void* user_data) {
+  static bool FirstLoop = true;
+  if (FirstLoop) {
+    FirstLoop = false;
+    return;
+  }
+
+  const auto win_height = getmaxy(win);
+  const auto win_width = getmaxx(win);
+
+  const auto JITData = reinterpret_cast<const JITStatsUserData*>(user_data);
+  const auto& TotalThisPeriod = JITData->TotalThisPeriod;
+  const auto& hottest_threads = JITData->hottest_threads;
+  const auto& sample_period = JITData->sample_period;
+  const auto& threads_sampled = JITData->threads_sampled;
+  const auto& total_jit_time = JITData->total_jit_time;
+  const auto& TotalJITInvocations = JITData->TotalJITInvocations;
+  const auto& Scale = JITData->Scale;
+  const auto& ScaleStr = JITData->ScaleStr;
+
+  const auto JITSeconds = (double)(TotalThisPeriod.AccumulatedJITTime) / g_stats.cycle_counter_frequency_double;
+  const auto SignalTime = (double)(TotalThisPeriod.AccumulatedSignalTime) / g_stats.cycle_counter_frequency_double;
+
+  const auto SIGBUSCount = TotalThisPeriod.SIGBUSCount;
+  const auto SMCCount = TotalThisPeriod.SMCCount;
+  const auto FloatFallbackCount = TotalThisPeriod.FloatFallbackCount;
+  const auto AccumulatedCacheMissCount = TotalThisPeriod.AccumulatedCacheMissCount;
+  const auto AccumulatedCacheReadLockTime = (double)(TotalThisPeriod.AccumulatedCacheReadLockTime) / g_stats.cycle_counter_frequency_double;
+  const auto AccumulatedCacheWriteLockTime = (double)(TotalThisPeriod.AccumulatedCacheWriteLockTime) / g_stats.cycle_counter_frequency_double;
+  const auto AccumulatedJITCount = TotalThisPeriod.AccumulatedJITCount;
+
+  const auto MaxActiveThreads = std::min<size_t>(g_stats.sampled_stats.size(), std::min<size_t>(g_stats.hardware_concurrency, 32));
+
+  mvwprintw(win, 1, 1, "Top %ld threads executing (%ld total)\n", g_stats.max_thread_loads.size(), threads_sampled);
+
+  size_t max_pips = std::min(win_width, 50) - 2;
+  double percentage_per_pip = 100.0 / (double)max_pips;
+
+  g_stats.empty_pip_data.resize(max_pips);
+  std::fill(g_stats.empty_pip_data.begin(), g_stats.empty_pip_data.begin() + max_pips, partial_pips.front());
+  size_t i = 0;
+  for (auto &thread_loads : std::ranges::reverse_view {g_stats.max_thread_loads}) {
+    double thread_load = std::min(thread_loads.load_percentage, 100.0f);
+    thread_loads.pip_data.resize(max_pips);
+    double rounded_down = std::floor(thread_load / 10.0) * 10.0;
+    size_t full_pips = rounded_down / percentage_per_pip;
+    size_t digit_percent = thread_load - rounded_down;
+    wmemset(thread_loads.pip_data.data(), partial_pips.front(), thread_loads.pip_data.size());
+    wmemset(thread_loads.pip_data.data(), partial_pips.back(), full_pips);
+    wmemset(thread_loads.pip_data.data() + full_pips, partial_pips[digit_percent], 1);
+
+    const auto y_offset = 2 + i;
+    mvwprintw(win, y_offset, 1, "[%ls]: %.02f%% (%zd ms/S, %zd cycles)\n", g_stats.empty_pip_data.data(), thread_load, CyclesToMilliseconds(thread_loads.TotalCycles), thread_loads.TotalCycles);
+    int attr = 0;
+    if (thread_load >= 75.0) {
+      attr = 1;
+    } else if (thread_load >= 50.0) {
+      attr = 2;
+    }
+    if (attr) {
+      attron(COLOR_PAIR(attr));
+    }
+    mvwprintw(win, y_offset, 1, "[%ls]", thread_loads.pip_data.data());
+    if (attr) {
+      attroff(COLOR_PAIR(attr));
+    }
+    ++i;
+  }
+
+  const double SamplePeriodNanoseconds = sample_period.count();
+
+  const double SIGBUS_l = SIGBUSCount;
+  const double SIGBUS_Per_Second = SIGBUS_l * (SamplePeriodNanoseconds / NanosecondsInSeconds);
+
+  const double AccumulatedCacheMissCount_l = AccumulatedCacheMissCount;
+  const double AccumulatedCacheMissCount_Per_Second = AccumulatedCacheMissCount_l * (SamplePeriodNanoseconds / NanosecondsInSeconds);
+
+  const double AccumulatedJITCount_l = AccumulatedJITCount;
+  const double AccumulatedJITCount_Per_Second = AccumulatedJITCount_l * (SamplePeriodNanoseconds / NanosecondsInSeconds);
+
+  mvwprintw(win, win_height - 12, 1, "Total (%zd millisecond sample period):\n", std::chrono::duration_cast<std::chrono::milliseconds>(SamplePeriod).count());
+  mvwprintw(win, win_height - 11, 1, "       JIT Time: %f %s (%.2f percent)\n", JITSeconds * Scale, ScaleStr, JITSeconds / (double)MaxActiveThreads * 100.0);
+  mvwprintw(win, win_height - 10, 1, "    Signal Time: %f %s (%.2f percent)\n", SignalTime * Scale, ScaleStr, SignalTime / (double)MaxActiveThreads * 100.0);
+  mvwprintw(win, win_height - 9, 1,  "     SIGBUS Cnt: %ld (%lf per second)\n", SIGBUSCount, SIGBUS_Per_Second);
+  mvwprintw(win, win_height - 8, 1,  "        SMC Cnt: %ld\n", SMCCount);
+  mvwprintw(win, win_height - 7, 1,  "  Softfloat Cnt: %s\n", CustomPrintInteger(FloatFallbackCount).c_str());
+  mvwprintw(win, win_height - 6, 1,  "  CacheMiss Cnt: %ld (%lf per second) (%s total JIT invocations)\n", AccumulatedCacheMissCount, AccumulatedCacheMissCount_Per_Second, CustomPrintInteger(TotalJITInvocations).c_str());
+  mvwprintw(win, win_height - 5, 1,  "    $RDLck Time: %f %s (%.2f percent)\n", AccumulatedCacheReadLockTime * Scale, ScaleStr, AccumulatedCacheReadLockTime / (double)MaxActiveThreads * 100.0);
+  mvwprintw(win, win_height - 4, 1,  "    $WRLck Time: %f %s (%.2f percent)\n", AccumulatedCacheWriteLockTime * Scale, ScaleStr, AccumulatedCacheWriteLockTime / (double)MaxActiveThreads * 100.0);
+  mvwprintw(win, win_height - 3, 1,  "        JIT Cnt: %ld (%lf percent)\n", AccumulatedJITCount, AccumulatedJITCount_Per_Second);
+  mvwprintw(win, win_height - 2, 1,  "FEX JIT Load:    %f (cycles: %ld)\n", JITData->fex_load, total_jit_time);
+
+  box(win, 0, 0);
+
+  // <Box> + <Lines of text> + <Thread stats> + <Top %d threads executing text>
+  const int Height = 2 + 11 + MaxActiveThreads + 1;
+  if (Height != win_height) {
+    g_stats.WinStackMgr.RequestNewHeight(0, Height);
+  }
+}
+
+void AppendJITstatsSubWin(WTF::WinStack *WinStackMgr, WINDOW *main, JITStatsUserData *JITData) {
+  int lines = 26;
+  int cols = COLS;
+  int y = 0;
+  int x = 0;
+  auto win = subwin(main, lines, cols, y, x);
+  WinStackMgr->AddToStack(HandleJITstats, win, JITData, WTF::WinStack::Properties {
+    .Height = lines,
+  });
+}
+
+void AppendMemstatsSubWin(WTF::WinStack *WinStackMgr, WINDOW *main) {
+  int lines = 15;
+  int cols = COLS;
+  int y = 0;
+  int x = 0;
+  auto win = subwin(main, lines, cols, y, x);
+  WinStackMgr->AddToStack(HandleMemstats, win, nullptr, WTF::WinStack::Properties {
+    .Height = lines,
+  });
+}
+
+void AppendGraphSubWin(WTF::WinStack *WinStackMgr, WINDOW *main) {
+  int lines = 12;
+  int cols = COLS;
+  int y = 0;
+  int x = 0;
+  auto win = subwin(main, lines, cols, y, x);
+  WinStackMgr->AddToStack(HandleHistogram, win, nullptr, WTF::WinStack::Properties {
+    .Height = lines,
+  });
+}
+
 int main(int argc, char** argv) {
   if (argc < 2) {
     printf("usage: %s [options] <pid>\n", argv[0]);
@@ -509,12 +702,15 @@ int main(int argc, char** argv) {
   g_stats.max_thread_loads.reserve(g_stats.hardware_concurrency);
 
   bool FirstLoop = true;
-  double Scale = 1000.0;
-  const char* ScaleStr = "ms/second";
-
   std::thread ResidentAnonThread {ResidentFEXAnonSampling};
 
   const char *ExitString {};
+
+  JITStatsUserData JITData {};
+
+  AppendJITstatsSubWin(&g_stats.WinStackMgr, window, &JITData);
+  AppendMemstatsSubWin(&g_stats.WinStackMgr, window);
+  AppendGraphSubWin(&g_stats.WinStackMgr, window);
 
   while (true) {
     if (g_stats.pidfd_watch != -1) {
@@ -532,45 +728,44 @@ int main(int argc, char** argv) {
       }
     }
 
-    FEXCore::Profiler::ThreadStats TotalThisPeriod {};
+    JITData.total_jit_time = {};
+    JITData.threads_sampled = {};
+    JITData.hottest_threads = {};
+    JITData.TotalJITInvocations = {};
+    JITData.TotalThisPeriod = {};
 
     // The writer side doesn't use atomics. Use a memory barrier to ensure writes are visible.
     store_memory_barrier();
 
     check_shm_update_necessary();
 
-
     auto Now = std::chrono::steady_clock::now();
 
     // Sample the stats from the process. Try and be as quick as possible.
     SampleStats(Now);
 
-    uint64_t total_jit_time {};
-    size_t threads_sampled {};
-    std::vector<uint64_t> hottest_threads;
-    uint64_t TotalJITInvocations {};
 #define accumulate(dest, name) dest += Stat->name - PreviousStats->name
     for (auto it = g_stats.sampled_stats.begin(); it != g_stats.sampled_stats.end();) {
-      ++threads_sampled;
+      ++JITData.threads_sampled;
       auto PreviousStats = &it->second.PreviousStats;
       auto Stat = &it->second.Stats;
       uint64_t total_time {};
 
       accumulate(total_time, AccumulatedJITTime);
       accumulate(total_time, AccumulatedSignalTime);
-      total_jit_time += total_time;
+      JITData.total_jit_time += total_time;
 
-      accumulate(TotalThisPeriod.AccumulatedJITTime, AccumulatedJITTime);
-      accumulate(TotalThisPeriod.AccumulatedSignalTime, AccumulatedSignalTime);
+      accumulate(JITData.TotalThisPeriod.AccumulatedJITTime, AccumulatedJITTime);
+      accumulate(JITData.TotalThisPeriod.AccumulatedSignalTime, AccumulatedSignalTime);
 
-      accumulate(TotalThisPeriod.SIGBUSCount, SIGBUSCount);
-      accumulate(TotalThisPeriod.SMCCount, SMCCount);
-      accumulate(TotalThisPeriod.FloatFallbackCount, FloatFallbackCount);
-      accumulate(TotalThisPeriod.AccumulatedCacheMissCount, AccumulatedCacheMissCount);
-      accumulate(TotalThisPeriod.AccumulatedCacheReadLockTime, AccumulatedCacheReadLockTime);
-      accumulate(TotalThisPeriod.AccumulatedCacheWriteLockTime, AccumulatedCacheWriteLockTime);
-      accumulate(TotalThisPeriod.AccumulatedJITCount, AccumulatedJITCount);
-      TotalJITInvocations += Stat->AccumulatedJITCount;
+      accumulate(JITData.TotalThisPeriod.SIGBUSCount, SIGBUSCount);
+      accumulate(JITData.TotalThisPeriod.SMCCount, SMCCount);
+      accumulate(JITData.TotalThisPeriod.FloatFallbackCount, FloatFallbackCount);
+      accumulate(JITData.TotalThisPeriod.AccumulatedCacheMissCount, AccumulatedCacheMissCount);
+      accumulate(JITData.TotalThisPeriod.AccumulatedCacheReadLockTime, AccumulatedCacheReadLockTime);
+      accumulate(JITData.TotalThisPeriod.AccumulatedCacheWriteLockTime, AccumulatedCacheWriteLockTime);
+      accumulate(JITData.TotalThisPeriod.AccumulatedJITCount, AccumulatedJITCount);
+      JITData.TotalJITInvocations += Stat->AccumulatedJITCount;
 
       memcpy(PreviousStats, Stat, g_stats.thread_stats_size_to_copy);
 
@@ -579,204 +774,37 @@ int main(int argc, char** argv) {
         continue;
       }
 
-      hottest_threads.emplace_back(total_time);
+      JITData.hottest_threads.emplace_back(total_time);
 
       ++it;
     }
 
-    std::sort(hottest_threads.begin(), hottest_threads.end(), std::greater<uint64_t>());
+    std::sort(JITData.hottest_threads.begin(), JITData.hottest_threads.end(), std::greater<uint64_t>());
 
     // Calculate loads based on the sample period that occurred.
     // FEX-Emu only counts cycles for the amount of time, so we need to calculate load based on the number of cycles that the sample period has.
-    const auto sample_period = Now - g_stats.previous_sample_period;
+    JITData.sample_period = Now - g_stats.previous_sample_period;
 
-    const double NanosecondsInSeconds = 1'000'000'000.0;
-    const double SamplePeriodNanoseconds = std::chrono::duration_cast<std::chrono::nanoseconds>(sample_period).count();
+    const double SamplePeriodNanoseconds = JITData.sample_period.count();
     const double MaximumCyclesInSecond = g_stats.cycle_counter_frequency_double;
     const double MaximumCyclesInSamplePeriod = MaximumCyclesInSecond * (SamplePeriodNanoseconds / NanosecondsInSeconds);
-    const double MaximumCoresThreadsPossible = std::min(g_stats.hardware_concurrency, threads_sampled);
+    const double MaximumCoresThreadsPossible = std::min(g_stats.hardware_concurrency, JITData.threads_sampled);
+    JITData.fex_load = ((double)JITData.total_jit_time / (MaximumCyclesInSamplePeriod * MaximumCoresThreadsPossible)) * 100.0;
 
-    double fex_load = ((double)total_jit_time / (MaximumCyclesInSamplePeriod * MaximumCoresThreadsPossible)) * 100.0;
-    size_t minimum_hot_threads = std::min(g_stats.hardware_concurrency, hottest_threads.size());
+    size_t minimum_hot_threads = std::min(g_stats.hardware_concurrency, JITData.hottest_threads.size());
     // For the top thread-loads, we are only ever showing up to how many hardware threads are available.
     g_stats.max_thread_loads.resize(minimum_hot_threads);
     for (size_t i = 0; i < minimum_hot_threads; ++i) {
-      g_stats.max_thread_loads[i].load_percentage = ((double)hottest_threads[i] / MaximumCyclesInSamplePeriod) * 100.0;
-      g_stats.max_thread_loads[i].TotalCycles = hottest_threads[i];
-    }
-
-    const size_t HistogramHeight = 11;
-    if (!FirstLoop) {
-      const auto JITSeconds = (double)(TotalThisPeriod.AccumulatedJITTime) / g_stats.cycle_counter_frequency_double;
-      const auto SignalTime = (double)(TotalThisPeriod.AccumulatedSignalTime) / g_stats.cycle_counter_frequency_double;
-
-      const auto SIGBUSCount = TotalThisPeriod.SIGBUSCount;
-      const auto SMCCount = TotalThisPeriod.SMCCount;
-      const auto FloatFallbackCount = TotalThisPeriod.FloatFallbackCount;
-      const auto AccumulatedCacheMissCount = TotalThisPeriod.AccumulatedCacheMissCount;
-      const auto AccumulatedCacheReadLockTime = (double)(TotalThisPeriod.AccumulatedCacheReadLockTime) / g_stats.cycle_counter_frequency_double;
-      const auto AccumulatedCacheWriteLockTime = (double)(TotalThisPeriod.AccumulatedCacheWriteLockTime) / g_stats.cycle_counter_frequency_double;
-      const auto AccumulatedJITCount = TotalThisPeriod.AccumulatedJITCount;
-
-      const auto MaxActiveThreads = std::min<size_t>(g_stats.sampled_stats.size(), g_stats.hardware_concurrency);
-
-      constexpr auto TopOfThreads = 24;
-      mvprintw(LINES - TopOfThreads - minimum_hot_threads - HistogramHeight, 0, "Top %ld threads executing (%ld total)\n", minimum_hot_threads, threads_sampled);
-
-      size_t max_pips = std::min(COLS, 50) - 2;
-      double percentage_per_pip = 100.0 / (double)max_pips;
-
-      g_stats.empty_pip_data.resize(max_pips);
-      std::fill(g_stats.empty_pip_data.begin(), g_stats.empty_pip_data.begin() + max_pips, partial_pips.front());
-      for (size_t i = 0; i < g_stats.max_thread_loads.size(); ++i) {
-        auto& thread_loads = g_stats.max_thread_loads[i];
-        double thread_load = std::min(thread_loads.load_percentage, 100.0f);
-        thread_loads.pip_data.resize(max_pips);
-        double rounded_down = std::floor(thread_load / 10.0) * 10.0;
-        size_t full_pips = rounded_down / percentage_per_pip;
-        size_t digit_percent = thread_load - rounded_down;
-        wmemset(thread_loads.pip_data.data(), partial_pips.front(), thread_loads.pip_data.size());
-        wmemset(thread_loads.pip_data.data(), partial_pips.back(), full_pips);
-        wmemset(thread_loads.pip_data.data() + full_pips, partial_pips[digit_percent], 1);
-
-        const auto y_offset = LINES - TopOfThreads - i - HistogramHeight;
-        mvprintw(y_offset, 0, "[%ls]: %.02f%% (%zd ms/S, %zd cycles)\n", g_stats.empty_pip_data.data(), thread_load, CyclesToMilliseconds(thread_loads.TotalCycles), thread_loads.TotalCycles);
-        int attr = 0;
-        if (thread_load >= 75.0) {
-          attr = 1;
-        } else if (thread_load >= 50.0) {
-          attr = 2;
-        }
-        if (attr) {
-          attron(COLOR_PAIR(attr));
-        }
-        mvprintw(y_offset, 0, "[%ls]", thread_loads.pip_data.data());
-        if (attr) {
-          attroff(COLOR_PAIR(attr));
-        }
-      }
-
-      mvprintw(LINES - 23 - HistogramHeight, 0, "Total (%zd millisecond sample period):\n",
-               std::chrono::duration_cast<std::chrono::milliseconds>(SamplePeriod).count());
-      mvprintw(LINES - 22 - HistogramHeight, 0, "       JIT Time: %f %s (%.2f percent)\n", JITSeconds * Scale, ScaleStr,
-               JITSeconds / (double)MaxActiveThreads * 100.0);
-      mvprintw(LINES - 21 - HistogramHeight, 0, "    Signal Time: %f %s (%.2f percent)\n", SignalTime * Scale, ScaleStr,
-               SignalTime / (double)MaxActiveThreads * 100.0);
-
-      const double SIGBUS_l = SIGBUSCount;
-      const double SIGBUS_Per_Second = SIGBUS_l * (SamplePeriodNanoseconds / NanosecondsInSeconds);
-
-      const double AccumulatedCacheMissCount_l = AccumulatedCacheMissCount;
-      const double AccumulatedCacheMissCount_Per_Second = AccumulatedCacheMissCount_l * (SamplePeriodNanoseconds / NanosecondsInSeconds);
-
-      const double AccumulatedJITCount_l = AccumulatedJITCount;
-      const double AccumulatedJITCount_Per_Second = AccumulatedJITCount_l * (SamplePeriodNanoseconds / NanosecondsInSeconds);
-      mvprintw(LINES - 20 - HistogramHeight, 0, "     SIGBUS Cnt: %ld (%lf per second)\n", SIGBUSCount, SIGBUS_Per_Second);
-      mvprintw(LINES - 19 - HistogramHeight, 0, "        SMC Cnt: %ld\n", SMCCount);
-      mvprintw(LINES - 18 - HistogramHeight, 0, "  Softfloat Cnt: %s\n", CustomPrintInteger(FloatFallbackCount).c_str());
-      mvprintw(LINES - 17 - HistogramHeight, 0, "  CacheMiss Cnt: %ld (%lf per second) (%s total JIT invocations)\n", AccumulatedCacheMissCount, AccumulatedCacheMissCount_Per_Second, CustomPrintInteger(TotalJITInvocations).c_str());
-      mvprintw(LINES - 16 - HistogramHeight, 0, "    $RDLck Time: %f %s (%.2f percent)\n", AccumulatedCacheReadLockTime * Scale, ScaleStr,
-               AccumulatedCacheReadLockTime / (double)MaxActiveThreads * 100.0);
-      mvprintw(LINES - 15 - HistogramHeight, 0, "    $WRLck Time: %f %s (%.2f percent)\n", AccumulatedCacheWriteLockTime * Scale, ScaleStr,
-               AccumulatedCacheWriteLockTime / (double)MaxActiveThreads * 100.0);
-      mvprintw(LINES - 14 - HistogramHeight, 0, "        JIT Cnt: %ld (%lf percent)\n", AccumulatedJITCount, AccumulatedJITCount_Per_Second);
+      g_stats.max_thread_loads[i].load_percentage = ((double)JITData.hottest_threads[i] / MaximumCyclesInSamplePeriod) * 100.0;
+      g_stats.max_thread_loads[i].TotalCycles = JITData.hottest_threads[i];
     }
 
     g_stats.fex_load_histogram.erase(g_stats.fex_load_histogram.begin());
-    g_stats.fex_load_histogram.push_back(fex_load);
+    g_stats.fex_load_histogram.push_back(JITData.fex_load);
 
-    size_t HistogramWidth = COLS - 2;
-    for (size_t i = 0; i < HistogramHeight - 1; ++i) {
-      mvprintw(LINES - i - 1, 0, "[");
-      mvprintw(LINES - i - 1, COLS - 1, "]");
-    }
-
-    mvprintw(LINES - 13 - HistogramHeight, 0, "FEX JIT Load: %f (cycles: %ld)\n", fex_load, total_jit_time);
-
-    const uint64_t MemBytes = g_stats.MemStats.TotalAnon.load();
-    const uint64_t MemBytesJIT = g_stats.MemStats.JITCode.load();
-    const uint64_t MemBytesOpDispatcher = g_stats.MemStats.OpDispatcher.load();
-    const uint64_t MemBytesFrontend = g_stats.MemStats.Frontend.load();
-    const uint64_t MemBytesCPUBackend = g_stats.MemStats.CPUBackend.load();
-    const uint64_t MemBytesLookup = g_stats.MemStats.Lookup.load();
-    const uint64_t MemBytesLookupL1 = g_stats.MemStats.LookupL1.load();
-    const uint64_t MemBytesThreadStates = g_stats.MemStats.ThreadStates.load();
-    const uint64_t MemBytesBlockLinks = g_stats.MemStats.BlockLinks.load();
-    const uint64_t MemBytesMisc = g_stats.MemStats.Misc.load();
-    const uint64_t MemBytesJEMalloc = g_stats.MemStats.JEMalloc.load();
-    const uint64_t MemBytesUnaccounted = g_stats.MemStats.Unaccounted.load();
-
-    constexpr static size_t TotalMemLines = 11;
-
-    if (MemBytes == ~0ULL) {
-      mvprintw(LINES - TotalMemLines - HistogramHeight, 0, "Total FEX Anon memory resident: Couldn't detect\n");
-
-    } else {
-      std::string SizeHuman = ConvertMemToHuman(MemBytes);
-      std::string SizeHumanJIT = ConvertMemToHuman(MemBytesJIT);
-      std::string SizeHumanOpDispatcher = ConvertMemToHuman(MemBytesOpDispatcher);
-      std::string SizeHumanFrontend = ConvertMemToHuman(MemBytesFrontend);
-      std::string SizeHumanCPUBackend = ConvertMemToHuman(MemBytesCPUBackend);
-      std::string SizeHumanLookup = ConvertMemToHuman(MemBytesLookup);
-      std::string SizeHumanLookupL1 = ConvertMemToHuman(MemBytesLookupL1);
-      std::string SizeHumanThreadStates = ConvertMemToHuman(MemBytesThreadStates);
-      std::string SizeHumanBlockLinks = ConvertMemToHuman(MemBytesBlockLinks);
-      std::string SizeHumanMisc = ConvertMemToHuman(MemBytesMisc);
-      std::string SizeHumanJEMalloc = ConvertMemToHuman(MemBytesJEMalloc);
-      std::string SizeHumanUnaccounted = ConvertMemToHuman(MemBytesUnaccounted);
-      std::string SizeHumanLargestUnaccounted = ConvertMemToHuman(g_stats.MemStats.LargestAnon.Size);
-
-      mvprintw(LINES - TotalMemLines + 0 - HistogramHeight, 0,  "Total FEX Anon memory resident: %s\n", SizeHuman.c_str());
-      mvprintw(LINES - TotalMemLines + 1 - HistogramHeight, 0,  "    JIT resident:             %s\n", SizeHumanJIT.c_str());
-      mvprintw(LINES - TotalMemLines + 2 - HistogramHeight, 0,  "    OpDispatcher resident:    %s\n", SizeHumanOpDispatcher.c_str());
-      mvprintw(LINES - TotalMemLines + 3 - HistogramHeight, 0,  "    Frontend resident:        %s\n", SizeHumanFrontend.c_str());
-      mvprintw(LINES - TotalMemLines + 4 - HistogramHeight, 0,  "    CPUBackend resident:      %s\n", SizeHumanCPUBackend.c_str());
-      mvprintw(LINES - TotalMemLines + 5 - HistogramHeight, 0,  "    Lookup cache resident:    %s\n", SizeHumanLookup.c_str());
-      mvprintw(LINES - TotalMemLines + 6 - HistogramHeight, 0,  "    Lookup L1 cache resident: %s\n", SizeHumanLookupL1.c_str());
-      mvprintw(LINES - TotalMemLines + 7 - HistogramHeight, 0,  "    ThreadStates resident:    %s\n", SizeHumanThreadStates.c_str());
-      mvprintw(LINES - TotalMemLines + 8 - HistogramHeight, 0,  "    BlockLinks resident:      %s\n", SizeHumanBlockLinks.c_str());
-      mvprintw(LINES - TotalMemLines + 9 - HistogramHeight, 0,  "          Misc resident:      %s\n", SizeHumanMisc.c_str());
-      mvprintw(LINES - TotalMemLines + 10 - HistogramHeight, 0, "    JEMalloc resident:        %s\n", SizeHumanJEMalloc.c_str());
-      mvprintw(LINES - TotalMemLines + 11 - HistogramHeight, 0, "    Unaccounted resident:     %s\n", SizeHumanUnaccounted.c_str());
-      mvprintw(LINES - TotalMemLines + 12 - HistogramHeight, 0, "                 Largest:     %s [0x%lx, 0x%lx) - p (void*) memset(0x%lx, 0xFF, %ld)\n",
-          SizeHumanLargestUnaccounted.c_str(), g_stats.MemStats.LargestAnon.Begin, g_stats.MemStats.LargestAnon.End, g_stats.MemStats.LargestAnon.Begin, g_stats.MemStats.LargestAnon.End - g_stats.MemStats.LargestAnon.Begin);
-    }
-
-    size_t j = 0;
-    for (auto& HistogramResult : std::ranges::reverse_view {g_stats.fex_load_histogram}) {
-      for (size_t i = 0; i < HistogramHeight - 1; ++i) {
-        int attr = 0;
-        if (HistogramResult >= 75.0) {
-          attr = 1;
-        } else if (HistogramResult >= 50.0) {
-          attr = 2;
-        }
-        if (attr) {
-          attron(COLOR_PAIR(attr));
-        }
-
-        double rounded_down = std::floor(HistogramResult / 10.0) * 10.0;
-        size_t tens_digit = rounded_down / 10.0;
-        size_t digit_percent = std::floor(HistogramResult - rounded_down);
-
-        size_t pip = 0;
-        if (tens_digit > i) {
-          pip = partial_pips.size() - 1;
-        } else if (tens_digit == i) {
-          pip = digit_percent;
-        }
-
-        mvprintw(LINES - i - 1, HistogramWidth - j, "%lc", partial_pips[pip]);
-        if (attr) {
-          attroff(COLOR_PAIR(attr));
-        }
-      }
-      ++j;
-      if (j >= HistogramWidth) {
-        break;
-      }
-    }
-
+    touchwin(window);
+    g_stats.WinStackMgr.UpdateWindowDimensions();
+    g_stats.WinStackMgr.RunStack();
     FirstLoop = false;
 
     g_stats.previous_sample_period = Now;
