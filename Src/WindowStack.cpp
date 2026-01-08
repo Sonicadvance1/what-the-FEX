@@ -21,7 +21,9 @@ void WinStack::RequestNewHeight(int StackID, int Height) {
   for (auto &Win : Stack) {
     if (Win.StackID != StackID) continue;
     Win.Props.Height = Height;
+    break;
   }
+  NewHeightRequested = true;
 }
 
 void WinStack::UpdateWindowDimensions() {
@@ -44,7 +46,7 @@ void WinStack::UpdateWindowDimensions() {
     const auto win_height = getmaxy(Win.win);
     auto win_width = getmaxx(Win.win);
 
-    if (win_y != y) {
+    if (win_y != y || win_height != Win.Props.Height) {
       NeedsUpdatedCoords = true;
       win_y = y;
     }
