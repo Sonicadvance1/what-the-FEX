@@ -681,6 +681,11 @@ void HandleJITstats(WINDOW *win, void* user_data) {
   box(win, 0, 0);
   bool IsSelected = selected == WIN_INDEX;
   mvwprintw(win, 0, 0, "%lc %lc %s", Selected[IsSelected], CollapsedItem[WinCollapsed ? 1 : 0], WIN_NAME);
+
+  char buffer[64];
+  int cx = snprintf(buffer, sizeof(buffer), "PID: %d", g_stats.pid);
+
+  mvwprintw(win, 0, win_width - cx - 1, "%s", buffer);
 }
 
 void AppendJITstatsSubWin(WTF::WinStack *WinStackMgr, WINDOW *main, JITStatsUserData *JITData) {
