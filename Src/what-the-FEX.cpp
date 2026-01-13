@@ -127,10 +127,9 @@ struct fex_stats {
 
   int pidfd_watch {-1};
 
-  constexpr static fex_histogram_data DEFAULT_HISTO = {
-    .load_percentage = 0.0,
-    .high_jit_load = false,
-  };
+  bool FirstLoop = true;
+
+  constexpr static fex_histogram_data DEFAULT_HISTO = {};
   fex_stats()
     : fex_load_histogram(200, DEFAULT_HISTO) {}
 };
@@ -791,6 +790,96 @@ void AppendGraphSubWin(WTF::WinStack *WinStackMgr, WINDOW *main) {
   });
 }
 
+void AccumulateJITStats(JITStatsUserData &JITData, std::chrono::time_point<std::chrono::steady_clock> Now) {
+  JITData.total_jit_time = {};
+  JITData.threads_sampled = {};
+  JITData.hottest_threads = {};
+  JITData.TotalJITInvocations = {};
+  JITData.TotalThisPeriod = {};
+
+  // The writer side doesn't use atomics. Use a memory barrier to ensure writes are visible.
+  store_memory_barrier();
+
+  check_shm_update_necessary();
+
+  // Sample the stats from the process. Try and be as quick as possible.
+  SampleStats(Now);
+
+#define accumulate(dest, name) dest += Stat->name - PreviousStats->name
+  for (auto it = g_stats.sampled_stats.begin(); it != g_stats.sampled_stats.end();) {
+    ++JITData.threads_sampled;
+    auto PreviousStats = &it->second.PreviousStats;
+    auto Stat = &it->second.Stats;
+    uint64_t total_time {};
+
+    accumulate(total_time, AccumulatedJITTime);
+    accumulate(total_time, AccumulatedSignalTime);
+    JITData.total_jit_time += total_time;
+
+    accumulate(JITData.TotalThisPeriod.AccumulatedJITTime, AccumulatedJITTime);
+    accumulate(JITData.TotalThisPeriod.AccumulatedSignalTime, AccumulatedSignalTime);
+
+    accumulate(JITData.TotalThisPeriod.SIGBUSCount, SIGBUSCount);
+    accumulate(JITData.TotalThisPeriod.SMCCount, SMCCount);
+    accumulate(JITData.TotalThisPeriod.FloatFallbackCount, FloatFallbackCount);
+    accumulate(JITData.TotalThisPeriod.AccumulatedCacheMissCount, AccumulatedCacheMissCount);
+    accumulate(JITData.TotalThisPeriod.AccumulatedCacheReadLockTime, AccumulatedCacheReadLockTime);
+    accumulate(JITData.TotalThisPeriod.AccumulatedCacheWriteLockTime, AccumulatedCacheWriteLockTime);
+    accumulate(JITData.TotalThisPeriod.AccumulatedJITCount, AccumulatedJITCount);
+    JITData.TotalJITInvocations += Stat->AccumulatedJITCount;
+
+    memcpy(PreviousStats, Stat, g_stats.thread_stats_size_to_copy);
+
+    if ((Now - it->second.LastSeen) >= std::chrono::seconds(10)) {
+      it = g_stats.sampled_stats.erase(it);
+      continue;
+    }
+
+    JITData.hottest_threads.emplace_back(total_time);
+
+    ++it;
+  }
+
+  std::sort(JITData.hottest_threads.begin(), JITData.hottest_threads.end(), std::greater<uint64_t>());
+
+  if (!g_stats.FirstLoop) {
+    // Calculate loads based on the sample period that occurred.
+    // FEX-Emu only counts cycles for the amount of time, so we need to calculate load based on the number of cycles that the sample period has.
+    JITData.sample_period = Now - g_stats.previous_sample_period;
+
+    const double SamplePeriodNanoseconds = JITData.sample_period.count();
+    const double MaximumCyclesInSecond = g_stats.cycle_counter_frequency_double;
+    const double MaximumCyclesInSamplePeriod = MaximumCyclesInSecond * (SamplePeriodNanoseconds / NanosecondsInSeconds);
+    const double MaximumCoresThreadsPossible = std::min(g_stats.hardware_concurrency, JITData.threads_sampled);
+    JITData.fex_load = ((double)JITData.total_jit_time / (MaximumCyclesInSamplePeriod * MaximumCoresThreadsPossible)) * 100.0;
+
+    size_t minimum_hot_threads = std::min(g_stats.hardware_concurrency, JITData.hottest_threads.size());
+    // For the top thread-loads, we are only ever showing up to how many hardware threads are available.
+    g_stats.max_thread_loads.resize(minimum_hot_threads);
+    for (size_t i = 0; i < minimum_hot_threads; ++i) {
+      g_stats.max_thread_loads[i].load_percentage = ((double)JITData.hottest_threads[i] / MaximumCyclesInSamplePeriod) * 100.0;
+      g_stats.max_thread_loads[i].TotalCycles = JITData.hottest_threads[i];
+    }
+
+    g_stats.fex_load_histogram.erase(g_stats.fex_load_histogram.begin());
+    g_stats.fex_load_histogram.push_back(fex_stats::fex_histogram_data {
+        .load_percentage = static_cast<float>(JITData.fex_load),
+        // High JIT load if we had more than a core of JIT load.
+        .high_jit_load = JITData.total_jit_time >= MaximumCyclesInSamplePeriod,
+        // Arbitrary check if SMC count was greater than 500
+        .high_invalidation_or_smc = JITData.TotalThisPeriod.SMCCount >= 500,
+        // Arbitrary SIGBUS count check.
+        .high_sigbus = JITData.TotalThisPeriod.SIGBUSCount >= 5'000,
+        // Arbitrary high_softloat at a million.
+        .high_softfloat = JITData.TotalThisPeriod.FloatFallbackCount >= 1'000'000,
+        });
+
+ }
+
+  g_stats.FirstLoop = false;
+  g_stats.previous_sample_period = Now;
+}
+
 int main(int argc, char** argv) {
   if (argc < 2) {
     printf("usage: %s [options] <pid>\n", argv[0]);
@@ -861,7 +950,6 @@ int main(int argc, char** argv) {
   g_stats.hardware_concurrency = std::thread::hardware_concurrency();
   g_stats.max_thread_loads.reserve(g_stats.hardware_concurrency);
 
-  bool FirstLoop = true;
   std::thread ResidentAnonThread {ResidentFEXAnonSampling};
 
   const char *ExitString {};
@@ -893,92 +981,7 @@ int main(int argc, char** argv) {
     if (CurrentSamples >= SamplePeriod) {
       // Say our remaining sample is max wait.
       CurrentSamples = std::chrono::milliseconds(10);
-
-      JITData.total_jit_time = {};
-      JITData.threads_sampled = {};
-      JITData.hottest_threads = {};
-      JITData.TotalJITInvocations = {};
-      JITData.TotalThisPeriod = {};
-
-      // The writer side doesn't use atomics. Use a memory barrier to ensure writes are visible.
-      store_memory_barrier();
-
-      check_shm_update_necessary();
-
-      // Sample the stats from the process. Try and be as quick as possible.
-      SampleStats(Now);
-
-#define accumulate(dest, name) dest += Stat->name - PreviousStats->name
-      for (auto it = g_stats.sampled_stats.begin(); it != g_stats.sampled_stats.end();) {
-        ++JITData.threads_sampled;
-        auto PreviousStats = &it->second.PreviousStats;
-        auto Stat = &it->second.Stats;
-        uint64_t total_time {};
-
-        accumulate(total_time, AccumulatedJITTime);
-        accumulate(total_time, AccumulatedSignalTime);
-        JITData.total_jit_time += total_time;
-
-        accumulate(JITData.TotalThisPeriod.AccumulatedJITTime, AccumulatedJITTime);
-        accumulate(JITData.TotalThisPeriod.AccumulatedSignalTime, AccumulatedSignalTime);
-
-        accumulate(JITData.TotalThisPeriod.SIGBUSCount, SIGBUSCount);
-        accumulate(JITData.TotalThisPeriod.SMCCount, SMCCount);
-        accumulate(JITData.TotalThisPeriod.FloatFallbackCount, FloatFallbackCount);
-        accumulate(JITData.TotalThisPeriod.AccumulatedCacheMissCount, AccumulatedCacheMissCount);
-        accumulate(JITData.TotalThisPeriod.AccumulatedCacheReadLockTime, AccumulatedCacheReadLockTime);
-        accumulate(JITData.TotalThisPeriod.AccumulatedCacheWriteLockTime, AccumulatedCacheWriteLockTime);
-        accumulate(JITData.TotalThisPeriod.AccumulatedJITCount, AccumulatedJITCount);
-        JITData.TotalJITInvocations += Stat->AccumulatedJITCount;
-
-        memcpy(PreviousStats, Stat, g_stats.thread_stats_size_to_copy);
-
-        if ((Now - it->second.LastSeen) >= std::chrono::seconds(10)) {
-          it = g_stats.sampled_stats.erase(it);
-          continue;
-        }
-
-        JITData.hottest_threads.emplace_back(total_time);
-
-        ++it;
-      }
-
-      std::sort(JITData.hottest_threads.begin(), JITData.hottest_threads.end(), std::greater<uint64_t>());
-
-      // Calculate loads based on the sample period that occurred.
-      // FEX-Emu only counts cycles for the amount of time, so we need to calculate load based on the number of cycles that the sample period has.
-      JITData.sample_period = Now - g_stats.previous_sample_period;
-
-      const double SamplePeriodNanoseconds = JITData.sample_period.count();
-      const double MaximumCyclesInSecond = g_stats.cycle_counter_frequency_double;
-      const double MaximumCyclesInSamplePeriod = MaximumCyclesInSecond * (SamplePeriodNanoseconds / NanosecondsInSeconds);
-      const double MaximumCoresThreadsPossible = std::min(g_stats.hardware_concurrency, JITData.threads_sampled);
-      JITData.fex_load = ((double)JITData.total_jit_time / (MaximumCyclesInSamplePeriod * MaximumCoresThreadsPossible)) * 100.0;
-
-      size_t minimum_hot_threads = std::min(g_stats.hardware_concurrency, JITData.hottest_threads.size());
-      // For the top thread-loads, we are only ever showing up to how many hardware threads are available.
-      g_stats.max_thread_loads.resize(minimum_hot_threads);
-      for (size_t i = 0; i < minimum_hot_threads; ++i) {
-        g_stats.max_thread_loads[i].load_percentage = ((double)JITData.hottest_threads[i] / MaximumCyclesInSamplePeriod) * 100.0;
-        g_stats.max_thread_loads[i].TotalCycles = JITData.hottest_threads[i];
-      }
-
-      g_stats.fex_load_histogram.erase(g_stats.fex_load_histogram.begin());
-      g_stats.fex_load_histogram.push_back(fex_stats::fex_histogram_data {
-        .load_percentage = static_cast<float>(JITData.fex_load),
-        // High JIT load if we had more than a core of JIT load.
-        .high_jit_load = JITData.total_jit_time >= MaximumCyclesInSamplePeriod,
-        // Arbitrary check if SMC count was greater than 500
-        .high_invalidation_or_smc = JITData.TotalThisPeriod.SMCCount >= 500,
-        // Arbitrary SIGBUS count check.
-        .high_sigbus = JITData.TotalThisPeriod.SIGBUSCount >= 5'000,
-        // Arbitrary high_softloat at a million.
-        .high_softfloat = JITData.TotalThisPeriod.FloatFallbackCount >= 1'000'000,
-      });
-
-      FirstLoop = false;
-
-      g_stats.previous_sample_period = Now;
+      AccumulateJITStats(JITData, Now);
     }
 
     if (ToggleCollapsed) {
