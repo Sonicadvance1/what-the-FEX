@@ -32,6 +32,13 @@
 #include <immintrin.h>
 #endif
 
+static int COLOR_ATTR_RED = COLORS + 1;
+static int COLOR_ATTR_YELLOW = COLORS + 2;
+static int COLOR_ATTR_MAGENTA = COLORS + 3;
+static int COLOR_ATTR_BLUE = COLORS + 4;
+static int COLOR_ATTR_CYAN = COLORS + 5;
+static int COLOR_ATTR_GREEN = COLORS + 6;
+
 static const std::array<wchar_t, 10> partial_pips {
   L'\U00002002', // 0%: Empty
   L'\U00002581', // 10%: 1/8 (12.5%)
@@ -82,7 +89,14 @@ struct fex_stats {
   };
   std::vector<max_thread_loads> max_thread_loads {};
 
-  std::vector<float> fex_load_histogram;
+  struct fex_histogram_data {
+    float load_percentage;
+    bool high_jit_load;
+    bool high_invalidation_or_smc;
+    bool high_sigbus;
+    bool high_softfloat;
+  };
+  std::vector<fex_histogram_data> fex_load_histogram;
 
   struct FEXMemStats final {
     // Total resident
@@ -113,8 +127,12 @@ struct fex_stats {
 
   int pidfd_watch {-1};
 
+  constexpr static fex_histogram_data DEFAULT_HISTO = {
+    .load_percentage = 0.0,
+    .high_jit_load = false,
+  };
   fex_stats()
-    : fex_load_histogram(200, 0.0f) {}
+    : fex_load_histogram(200, DEFAULT_HISTO) {}
 };
 
 auto SamplePeriod = std::chrono::milliseconds(1000);
@@ -464,20 +482,52 @@ void HandleHistogram(WINDOW *win, void* user_data) {
     size_t j = 0;
 
     for (auto& HistogramResult : std::ranges::reverse_view {g_stats.fex_load_histogram}) {
+      struct pip_stack_data {
+        wchar_t pip;
+        int attr {};
+      };
+
+      std::vector<pip_stack_data> pip_stack;
+
+      if (HistogramResult.high_jit_load) {
+        pip_stack.emplace_back(pip_stack_data {
+            .pip = partial_pips[partial_pips.size() - 1],
+            .attr = COLOR_ATTR_MAGENTA,
+        });
+      }
+
+      if (HistogramResult.high_invalidation_or_smc) {
+        pip_stack.emplace_back(pip_stack_data {
+            .pip = partial_pips[partial_pips.size() - 1],
+            .attr = COLOR_ATTR_BLUE,
+        });
+      }
+
+      if (HistogramResult.high_sigbus) {
+        pip_stack.emplace_back(pip_stack_data {
+            .pip = partial_pips[partial_pips.size() - 1],
+            .attr = COLOR_ATTR_CYAN,
+        });
+      }
+
+      if (HistogramResult.high_softfloat) {
+        pip_stack.emplace_back(pip_stack_data {
+            .pip = partial_pips[partial_pips.size() - 1],
+            .attr = COLOR_ATTR_GREEN,
+        });
+      }
+
       for (size_t i = 0; i < HistogramHeight; ++i) {
         int attr = 0;
-        if (HistogramResult >= 75.0) {
-          attr = 1;
-        } else if (HistogramResult >= 50.0) {
-          attr = 2;
-        }
-        if (attr) {
-          wattron(win, COLOR_PAIR(attr));
+        if (HistogramResult.load_percentage >= 75.0) {
+          attr = COLOR_ATTR_RED;
+        } else if (HistogramResult.load_percentage >= 50.0) {
+          attr = COLOR_ATTR_YELLOW;
         }
 
-        double rounded_down = std::floor(HistogramResult / 10.0) * 10.0;
+        double rounded_down = std::floor(HistogramResult.load_percentage / 10.0) * 10.0;
         size_t tens_digit = rounded_down / 10.0;
-        size_t digit_percent = std::floor(HistogramResult - rounded_down);
+        size_t digit_percent = std::floor(HistogramResult.load_percentage - rounded_down);
 
         size_t pip = 0;
         if (tens_digit > i) {
@@ -486,12 +536,30 @@ void HandleHistogram(WINDOW *win, void* user_data) {
           pip = digit_percent;
         }
 
-        mvwprintw(win, HistogramHeight - i, win_width - j - 2, "%lc", partial_pips[pip]);
+        auto pip_char = partial_pips[pip];
+
+        if (i < pip_stack.size()) {
+          attr = pip_stack[i].attr;
+
+          if (pip <= i) {
+            pip_char = pip_stack[i].pip;
+          }
+        }
+
+        if (attr) {
+          wattron(win, COLOR_PAIR(attr));
+        }
+
+        mvwprintw(win, HistogramHeight - i, win_width - j - 2, "%lc", pip_char);
         if (attr) {
           wattroff(win, COLOR_PAIR(attr));
         }
       }
       ++j;
+    }
+  } else {
+    for (size_t i = 0; i < win_height; ++i) {
+      mvwhline(win, i, 0, ' ', win_width);
     }
   }
 
@@ -636,9 +704,9 @@ void HandleJITstats(WINDOW *win, void* user_data) {
       mvwprintw(win, y_offset, 1, "[%ls]: %.02f%% (%zd ms/S, %zd cycles)\n", g_stats.empty_pip_data.data(), thread_load, CyclesToMilliseconds(thread_loads.TotalCycles), thread_loads.TotalCycles);
       int attr = 0;
       if (thread_load >= 75.0) {
-        attr = 1;
+        attr = COLOR_ATTR_RED;
       } else if (thread_load >= 50.0) {
-        attr = 2;
+        attr = COLOR_ATTR_YELLOW;
       }
       if (attr) {
         attron(COLOR_PAIR(attr));
@@ -757,8 +825,12 @@ int main(int argc, char** argv) {
   nodelay(window, true);
   keypad(window, true);
   start_color();
-  init_pair(1, COLOR_RED, COLOR_BLACK);
-  init_pair(2, COLOR_YELLOW, COLOR_BLACK);
+  init_pair(COLOR_ATTR_RED, COLOR_RED, COLOR_BLACK);
+  init_pair(COLOR_ATTR_YELLOW, COLOR_YELLOW, COLOR_BLACK);
+  init_pair(COLOR_ATTR_MAGENTA, COLOR_MAGENTA, COLOR_BLACK);
+  init_pair(COLOR_ATTR_BLUE, COLOR_BLUE, COLOR_BLACK);
+  init_pair(COLOR_ATTR_CYAN, COLOR_CYAN, COLOR_BLACK);
+  init_pair(COLOR_ATTR_GREEN, COLOR_GREEN, COLOR_BLACK);
 
   g_stats.shm_size = buf.st_size;
   g_stats.shm_base = mmap(nullptr, g_stats.shm_size, PROT_READ, MAP_SHARED, g_stats.shm_fd, 0);
@@ -892,7 +964,17 @@ int main(int argc, char** argv) {
       }
 
       g_stats.fex_load_histogram.erase(g_stats.fex_load_histogram.begin());
-      g_stats.fex_load_histogram.push_back(JITData.fex_load);
+      g_stats.fex_load_histogram.push_back(fex_stats::fex_histogram_data {
+        .load_percentage = static_cast<float>(JITData.fex_load),
+        // High JIT load if we had more than a core of JIT load.
+        .high_jit_load = JITData.total_jit_time >= MaximumCyclesInSamplePeriod,
+        // Arbitrary check if SMC count was greater than 500
+        .high_invalidation_or_smc = JITData.TotalThisPeriod.SMCCount >= 500,
+        // Arbitrary SIGBUS count check.
+        .high_sigbus = JITData.TotalThisPeriod.SIGBUSCount >= 5'000,
+        // Arbitrary high_softloat at a million.
+        .high_softfloat = JITData.TotalThisPeriod.FloatFallbackCount >= 1'000'000,
+      });
 
       FirstLoop = false;
 
