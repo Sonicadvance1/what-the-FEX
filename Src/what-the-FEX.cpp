@@ -394,6 +394,7 @@ static void SampleStats(std::chrono::steady_clock::time_point Now) {
 }
 
 static int selected = 0;
+bool ToggleCollapsed {};
 bool Collapsed[3] {};
 
 void HandleSelectMove(int c) {
@@ -428,6 +429,7 @@ void HandleSelectMove(int c) {
   }
   else if (c == KEY_RIGHT) {
     Collapsed[selected] ^= true;
+    ToggleCollapsed = true;
   }
 }
 
@@ -897,6 +899,10 @@ int main(int argc, char** argv) {
       g_stats.previous_sample_period = Now;
     }
 
+    if (ToggleCollapsed) {
+      ToggleCollapsed = false;
+      g_stats.WinStackMgr.ClearWindowStack();
+    }
     touchwin(window);
     g_stats.WinStackMgr.UpdateWindowDimensions();
     g_stats.WinStackMgr.RunStack();

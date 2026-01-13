@@ -43,16 +43,25 @@ void WinStack::UpdateWindowDimensions() {
     auto win_x = getparx(Win.win);
     auto win_y = getpary(Win.win);
 
-    const auto win_height = getmaxy(Win.win);
+    auto win_height = getmaxy(Win.win);
     auto win_width = getmaxx(Win.win);
 
-    if (win_y != y || win_height != Win.Props.Height) {
+    // If the Window location has changed, then update.
+    if (win_y != y) {
       NeedsUpdatedCoords = true;
       win_y = y;
     }
 
+    // If the window height no longer matches, then update.
+    if (win_height != Win.Props.Height) {
+      NeedsUpdatedCoords = true;
+      win_height = Win.Props.Height;
+    }
+
+    // Next y.
     y += Win.Props.Height;
 
+    // Update width when width changes.
     if ((win_x + win_width) != WindowWidth) {
       NeedsUpdatedCoords = true;
       win_width = WindowWidth - win_x;
@@ -90,6 +99,13 @@ int WinStack::Resize(WINDOW* win, int width, int height) {
 
 int WinStack::Move(WINDOW* win, int x, int y) {
   return mvderwin(win, y, x);
+}
+
+void WinStack::ClearWindowStack() {
+  for (const auto& Member : Stack) {
+    wclear(Member.win);
+    touchwin(Member.win);
+  }
 }
 
 }

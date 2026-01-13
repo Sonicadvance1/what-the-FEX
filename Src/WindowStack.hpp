@@ -15,6 +15,7 @@ class WinStack final {
     void RunStack();
 
     void RequestNewHeight(int StackID, int Height);
+    void ClearWindowStack();
 
   private:
     int StackID {};
