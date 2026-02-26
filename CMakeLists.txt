@@ -18,3 +18,7 @@ endif()
 
 add_executable(WTF Src/what-the-FEX.cpp Src/WindowStack.cpp)
 target_link_libraries(WTF PRIVATE Curses::Curses)
+
+install(TARGETS WTF RUNTIME
+    DESTINATION bin
+    COMPONENT Runtime)
