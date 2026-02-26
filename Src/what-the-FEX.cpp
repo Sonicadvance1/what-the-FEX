@@ -107,10 +107,11 @@ struct fex_stats {
     std::atomic<uint64_t> OpDispatcher {~0ULL};
     std::atomic<uint64_t> Frontend {~0ULL};
     std::atomic<uint64_t> CPUBackend {~0ULL};
-    std::atomic<uint64_t> Lookup {~0ULL};
+    std::atomic<uint64_t> LookupL2 {~0ULL};
     std::atomic<uint64_t> LookupL1 {~0ULL};
     std::atomic<uint64_t> ThreadStates {~0ULL};
     std::atomic<uint64_t> BlockLinks {~0ULL};
+    std::atomic<uint64_t> CallRetStacks {~0ULL};
     std::atomic<uint64_t> Misc {~0ULL};
     std::atomic<uint64_t> FEXAllocator {~0ULL};
     std::atomic<uint64_t> Unaccounted {~0ULL};
@@ -254,10 +255,11 @@ static void ResidentFEXAnonSampling() {
     uint64_t TotalOpDispatcherResident {};
     uint64_t TotalFrontendResident {};
     uint64_t TotalCPUBackendResident {};
-    uint64_t TotalLookupResident {};
+    uint64_t TotalLookupL2Resident {};
     uint64_t TotalLookupL1Resident {};
     uint64_t TotalThreadStateResident {};
     uint64_t TotalBlockLinksResident {};
+    uint64_t TotalCallRetStacksResident {};
     uint64_t TotalMiscResident{};
     uint64_t TotalFEXAllocator{};
     uint64_t TotalUnaccounted{};
@@ -284,11 +286,13 @@ static void ResidentFEXAnonSampling() {
         } else if (Line.find("FEXMem_Lookup_L1") != Line.npos) {
           ActiveSubRegion = &TotalLookupL1Resident;
         } else if (Line.find("FEXMem_Lookup") != Line.npos) {
-          ActiveSubRegion = &TotalLookupResident;
+          ActiveSubRegion = &TotalLookupL2Resident;
         } else if (Line.find("FEXMem_ThreadState") != Line.npos) {
           ActiveSubRegion = &TotalThreadStateResident;
         } else if (Line.find("FEXMem_BlockLinks") != Line.npos) {
           ActiveSubRegion = &TotalBlockLinksResident;
+        } else if (Line.find("FEXMem_CallRetStacks") != Line.npos) {
+          ActiveSubRegion = &TotalCallRetStacksResident;
         } else if (Line.find("FEXMem_Misc") != Line.npos) {
           ActiveSubRegion = &TotalMiscResident;
         } else {
@@ -343,10 +347,11 @@ static void ResidentFEXAnonSampling() {
       g_stats.MemStats.OpDispatcher.store(TotalOpDispatcherResident);
       g_stats.MemStats.Frontend.store(TotalFrontendResident);
       g_stats.MemStats.CPUBackend.store(TotalCPUBackendResident);
-      g_stats.MemStats.Lookup.store(TotalLookupResident);
+      g_stats.MemStats.LookupL2.store(TotalLookupL2Resident);
       g_stats.MemStats.LookupL1.store(TotalLookupL1Resident);
       g_stats.MemStats.ThreadStates.store(TotalThreadStateResident);
       g_stats.MemStats.BlockLinks.store(TotalBlockLinksResident);
+      g_stats.MemStats.CallRetStacks.store(TotalCallRetStacksResident);
       g_stats.MemStats.Misc.store(TotalMiscResident);
       g_stats.MemStats.FEXAllocator.store(TotalFEXAllocator);
       g_stats.MemStats.Unaccounted.store(TotalUnaccounted);
@@ -608,10 +613,11 @@ void HandleMemstats(WINDOW *win, void* user_data) {
     const uint64_t MemBytesOpDispatcher = g_stats.MemStats.OpDispatcher.load();
     const uint64_t MemBytesFrontend = g_stats.MemStats.Frontend.load();
     const uint64_t MemBytesCPUBackend = g_stats.MemStats.CPUBackend.load();
-    const uint64_t MemBytesLookup = g_stats.MemStats.Lookup.load();
+    const uint64_t MemBytesLookupL2 = g_stats.MemStats.LookupL2.load();
     const uint64_t MemBytesLookupL1 = g_stats.MemStats.LookupL1.load();
     const uint64_t MemBytesThreadStates = g_stats.MemStats.ThreadStates.load();
     const uint64_t MemBytesBlockLinks = g_stats.MemStats.BlockLinks.load();
+    const uint64_t MemBytesCallRetStacks = g_stats.MemStats.CallRetStacks.load();
     const uint64_t MemBytesMisc = g_stats.MemStats.Misc.load();
     const uint64_t MemBytesFEXAllocator = g_stats.MemStats.FEXAllocator.load();
     const uint64_t MemBytesUnaccounted = g_stats.MemStats.Unaccounted.load();
@@ -626,10 +632,11 @@ void HandleMemstats(WINDOW *win, void* user_data) {
       std::string SizeHumanOpDispatcher = ConvertMemToHuman(MemBytesOpDispatcher);
       std::string SizeHumanFrontend = ConvertMemToHuman(MemBytesFrontend);
       std::string SizeHumanCPUBackend = ConvertMemToHuman(MemBytesCPUBackend);
-      std::string SizeHumanLookup = ConvertMemToHuman(MemBytesLookup);
+      std::string SizeHumanLookupL2 = ConvertMemToHuman(MemBytesLookupL2);
       std::string SizeHumanLookupL1 = ConvertMemToHuman(MemBytesLookupL1);
       std::string SizeHumanThreadStates = ConvertMemToHuman(MemBytesThreadStates);
       std::string SizeHumanBlockLinks = ConvertMemToHuman(MemBytesBlockLinks);
+      std::string SizeHumanCallRetStacks = ConvertMemToHuman(MemBytesCallRetStacks);
       std::string SizeHumanMisc = ConvertMemToHuman(MemBytesMisc);
       std::string SizeHumanFEXAllocator = ConvertMemToHuman(MemBytesFEXAllocator);
       std::string SizeHumanUnaccounted = ConvertMemToHuman(MemBytesUnaccounted);
@@ -640,11 +647,12 @@ void HandleMemstats(WINDOW *win, void* user_data) {
       mvwprintw(win, 3, 1,  "    OpDispatcher resident:    %s\n", SizeHumanOpDispatcher.c_str());
       mvwprintw(win, 4, 1,  "    Frontend resident:        %s\n", SizeHumanFrontend.c_str());
       mvwprintw(win, 5, 1,  "    CPUBackend resident:      %s\n", SizeHumanCPUBackend.c_str());
-      mvwprintw(win, 6, 1,  "    Lookup cache resident:    %s\n", SizeHumanLookup.c_str());
       mvwprintw(win, 7, 1,  "    Lookup L1 cache resident: %s\n", SizeHumanLookupL1.c_str());
+      mvwprintw(win, 6, 1,  "    Lookup L2 cache resident: %s\n", SizeHumanLookupL2.c_str());
       mvwprintw(win, 8, 1,  "    ThreadStates resident:    %s\n", SizeHumanThreadStates.c_str());
       mvwprintw(win, 9, 1,  "    BlockLinks resident:      %s\n", SizeHumanBlockLinks.c_str());
-      mvwprintw(win, 10, 1,  "          Misc resident:     %s\n", SizeHumanMisc.c_str());
+      mvwprintw(win, 9, 1,  "    CallRetStacks resident:   %s\n", SizeHumanCallRetStacks.c_str());
+      mvwprintw(win, 10, 1, "          Misc resident:      %s\n", SizeHumanMisc.c_str());
       mvwprintw(win, 11, 1, "    FEXAllocator resident:    %s\n", SizeHumanFEXAllocator.c_str());
       mvwprintw(win, 12, 1, "    Unaccounted resident:     %s\n", SizeHumanUnaccounted.c_str());
       mvwprintw(win, 13, 1, "                 Largest:     %s [0x%lx, 0x%lx) - p (void*) memset(0x%lx, 0xFF, %ld)\n",
