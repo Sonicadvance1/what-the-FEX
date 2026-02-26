@@ -603,61 +603,52 @@ void HandleMemstats(WINDOW *win, void* user_data) {
   const auto WIN_INDEX = 1;
   const auto WIN_NAME = "FEX Memory Usage";
   const bool WinCollapsed = Collapsed[WIN_INDEX];
+
+  struct Atomics {
+    const char* Name;
+    size_t Offset;
+  };
+
+  constexpr std::array<Atomics, 13> atomics = {{
+    {"Total FEX Anon memory resident: %s\n", offsetof(fex_stats::FEXMemStats, TotalAnon)},
+    {"    JIT resident:             %s\n", offsetof(fex_stats::FEXMemStats, JITCode)},
+    {"    OpDispatcher resident:    %s\n", offsetof(fex_stats::FEXMemStats, OpDispatcher)},
+    {"    Frontend resident:        %s\n", offsetof(fex_stats::FEXMemStats, Frontend)},
+    {"    CPUBackend resident:      %s\n", offsetof(fex_stats::FEXMemStats, CPUBackend)},
+    {"    Lookup L2 cache resident: %s\n", offsetof(fex_stats::FEXMemStats, LookupL2)},
+    {"    Lookup L1 cache resident: %s\n", offsetof(fex_stats::FEXMemStats, LookupL1)},
+    {"    ThreadStates resident:    %s\n", offsetof(fex_stats::FEXMemStats, ThreadStates)},
+    {"    BlockLinks resident:      %s\n", offsetof(fex_stats::FEXMemStats, BlockLinks)},
+    {"    CallRetStacks resident:   %s\n", offsetof(fex_stats::FEXMemStats, CallRetStacks)},
+    {"    Misc resident:            %s\n", offsetof(fex_stats::FEXMemStats, Misc)},
+    {"    FEXAllocator resident:    %s\n", offsetof(fex_stats::FEXMemStats, FEXAllocator)},
+    {"    Unaccounted resident:     %s\n", offsetof(fex_stats::FEXMemStats, Unaccounted)},
+  }};
+
+  constexpr static size_t TotalMemLines = atomics.size() + 1;
   if (!WinCollapsed) {
-    g_stats.WinStackMgr.RequestNewHeight(WIN_INDEX, 15);
+    g_stats.WinStackMgr.RequestNewHeight(WIN_INDEX, TotalMemLines + 2);
   } else if (WinCollapsed) {
     g_stats.WinStackMgr.RequestNewHeight(WIN_INDEX, 1);
   }
 
   if (!WinCollapsed) {
     const uint64_t MemBytes = g_stats.MemStats.TotalAnon.load();
-    const uint64_t MemBytesJIT = g_stats.MemStats.JITCode.load();
-    const uint64_t MemBytesOpDispatcher = g_stats.MemStats.OpDispatcher.load();
-    const uint64_t MemBytesFrontend = g_stats.MemStats.Frontend.load();
-    const uint64_t MemBytesCPUBackend = g_stats.MemStats.CPUBackend.load();
-    const uint64_t MemBytesLookupL2 = g_stats.MemStats.LookupL2.load();
-    const uint64_t MemBytesLookupL1 = g_stats.MemStats.LookupL1.load();
-    const uint64_t MemBytesThreadStates = g_stats.MemStats.ThreadStates.load();
-    const uint64_t MemBytesBlockLinks = g_stats.MemStats.BlockLinks.load();
-    const uint64_t MemBytesCallRetStacks = g_stats.MemStats.CallRetStacks.load();
-    const uint64_t MemBytesMisc = g_stats.MemStats.Misc.load();
-    const uint64_t MemBytesFEXAllocator = g_stats.MemStats.FEXAllocator.load();
-    const uint64_t MemBytesUnaccounted = g_stats.MemStats.Unaccounted.load();
-
-    constexpr static size_t TotalMemLines = 11;
 
     if (MemBytes == ~0ULL) {
       mvwprintw(win, 1, 1, "Total FEX Anon memory resident: Couldn't detect\n");
     } else {
-      std::string SizeHuman = ConvertMemToHuman(MemBytes);
-      std::string SizeHumanJIT = ConvertMemToHuman(MemBytesJIT);
-      std::string SizeHumanOpDispatcher = ConvertMemToHuman(MemBytesOpDispatcher);
-      std::string SizeHumanFrontend = ConvertMemToHuman(MemBytesFrontend);
-      std::string SizeHumanCPUBackend = ConvertMemToHuman(MemBytesCPUBackend);
-      std::string SizeHumanLookupL2 = ConvertMemToHuman(MemBytesLookupL2);
-      std::string SizeHumanLookupL1 = ConvertMemToHuman(MemBytesLookupL1);
-      std::string SizeHumanThreadStates = ConvertMemToHuman(MemBytesThreadStates);
-      std::string SizeHumanBlockLinks = ConvertMemToHuman(MemBytesBlockLinks);
-      std::string SizeHumanCallRetStacks = ConvertMemToHuman(MemBytesCallRetStacks);
-      std::string SizeHumanMisc = ConvertMemToHuman(MemBytesMisc);
-      std::string SizeHumanFEXAllocator = ConvertMemToHuman(MemBytesFEXAllocator);
-      std::string SizeHumanUnaccounted = ConvertMemToHuman(MemBytesUnaccounted);
-      std::string SizeHumanLargestUnaccounted = ConvertMemToHuman(g_stats.MemStats.LargestAnon.Size);
 
-      mvwprintw(win, 1, 1,  "Total FEX Anon memory resident: %s\n", SizeHuman.c_str());
-      mvwprintw(win, 2, 1,  "    JIT resident:             %s\n", SizeHumanJIT.c_str());
-      mvwprintw(win, 3, 1,  "    OpDispatcher resident:    %s\n", SizeHumanOpDispatcher.c_str());
-      mvwprintw(win, 4, 1,  "    Frontend resident:        %s\n", SizeHumanFrontend.c_str());
-      mvwprintw(win, 5, 1,  "    CPUBackend resident:      %s\n", SizeHumanCPUBackend.c_str());
-      mvwprintw(win, 7, 1,  "    Lookup L1 cache resident: %s\n", SizeHumanLookupL1.c_str());
-      mvwprintw(win, 6, 1,  "    Lookup L2 cache resident: %s\n", SizeHumanLookupL2.c_str());
-      mvwprintw(win, 8, 1,  "    ThreadStates resident:    %s\n", SizeHumanThreadStates.c_str());
-      mvwprintw(win, 9, 1,  "    BlockLinks resident:      %s\n", SizeHumanBlockLinks.c_str());
-      mvwprintw(win, 9, 1,  "    CallRetStacks resident:   %s\n", SizeHumanCallRetStacks.c_str());
-      mvwprintw(win, 10, 1, "          Misc resident:      %s\n", SizeHumanMisc.c_str());
-      mvwprintw(win, 11, 1, "    FEXAllocator resident:    %s\n", SizeHumanFEXAllocator.c_str());
-      mvwprintw(win, 12, 1, "    Unaccounted resident:     %s\n", SizeHumanUnaccounted.c_str());
-      mvwprintw(win, 13, 1, "                 Largest:     %s [0x%lx, 0x%lx) - p (void*) memset(0x%lx, 0xFF, %ld)\n",
+      for (size_t i = 0; i < atomics.size(); ++i) {
+        const auto& atomic_info = atomics[i];
+        const auto Value = reinterpret_cast<std::atomic<uint64_t>*>(reinterpret_cast<uintptr_t>(&g_stats.MemStats) + atomic_info.Offset)->load();
+        const auto ValueName = ConvertMemToHuman(Value);
+        mvwprintw(win, i + 1, 1, atomic_info.Name, ValueName.c_str());
+      }
+
+      const auto SizeHumanLargestUnaccounted = ConvertMemToHuman(g_stats.MemStats.LargestAnon.Size);
+
+      mvwprintw(win, atomics.size() + 1, 1, "                 Largest:     %s [0x%lx, 0x%lx) - p (void*) memset(0x%lx, 0xFF, %ld)\n",
           SizeHumanLargestUnaccounted.c_str(), g_stats.MemStats.LargestAnon.Begin, g_stats.MemStats.LargestAnon.End, g_stats.MemStats.LargestAnon.Begin, g_stats.MemStats.LargestAnon.End - g_stats.MemStats.LargestAnon.Begin);
     }
   }
