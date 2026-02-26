@@ -112,7 +112,7 @@ struct fex_stats {
     std::atomic<uint64_t> ThreadStates {~0ULL};
     std::atomic<uint64_t> BlockLinks {~0ULL};
     std::atomic<uint64_t> Misc {~0ULL};
-    std::atomic<uint64_t> JEMalloc {~0ULL};
+    std::atomic<uint64_t> FEXAllocator {~0ULL};
     std::atomic<uint64_t> Unaccounted {~0ULL};
 
     struct LargestAnonType {
@@ -259,7 +259,7 @@ static void ResidentFEXAnonSampling() {
     uint64_t TotalThreadStateResident {};
     uint64_t TotalBlockLinksResident {};
     uint64_t TotalMiscResident{};
-    uint64_t TotalJEMallocResident{};
+    uint64_t TotalFEXAllocator{};
     uint64_t TotalUnaccounted{};
     fex_stats::FEXMemStats::LargestAnonType LargestRSSAnon {};
 
@@ -300,7 +300,7 @@ static void ResidentFEXAnonSampling() {
       }
 
       if (Line.find("JEMalloc") != Line.npos || Line.find("FEXAllocator") != Line.npos) {
-        ActiveSubRegion = &TotalJEMallocResident;
+        ActiveSubRegion = &TotalFEXAllocator;
         sscanf(Line.c_str(), "%lx-%lx", &Begin, &End);
         continue;
       }
@@ -322,7 +322,7 @@ static void ResidentFEXAnonSampling() {
         TotalResident += ResidentInBytes;
         *ActiveSubRegion += ResidentInBytes;
 
-        if (ActiveSubRegion == &TotalJEMallocResident) {
+        if (ActiveSubRegion == &TotalFEXAllocator) {
           if (LargestRSSAnon.Size < ResidentInBytes) {
             LargestRSSAnon = {
               .Begin = Begin,
@@ -348,7 +348,7 @@ static void ResidentFEXAnonSampling() {
       g_stats.MemStats.ThreadStates.store(TotalThreadStateResident);
       g_stats.MemStats.BlockLinks.store(TotalBlockLinksResident);
       g_stats.MemStats.Misc.store(TotalMiscResident);
-      g_stats.MemStats.JEMalloc.store(TotalJEMallocResident);
+      g_stats.MemStats.FEXAllocator.store(TotalFEXAllocator);
       g_stats.MemStats.Unaccounted.store(TotalUnaccounted);
     }
     std::this_thread::sleep_for(SamplePeriod);
@@ -588,7 +588,7 @@ void HandleMemstats(WINDOW *win, void* user_data) {
     const uint64_t MemBytesThreadStates = g_stats.MemStats.ThreadStates.load();
     const uint64_t MemBytesBlockLinks = g_stats.MemStats.BlockLinks.load();
     const uint64_t MemBytesMisc = g_stats.MemStats.Misc.load();
-    const uint64_t MemBytesJEMalloc = g_stats.MemStats.JEMalloc.load();
+    const uint64_t MemBytesFEXAllocator = g_stats.MemStats.FEXAllocator.load();
     const uint64_t MemBytesUnaccounted = g_stats.MemStats.Unaccounted.load();
 
     constexpr static size_t TotalMemLines = 11;
@@ -606,7 +606,7 @@ void HandleMemstats(WINDOW *win, void* user_data) {
       std::string SizeHumanThreadStates = ConvertMemToHuman(MemBytesThreadStates);
       std::string SizeHumanBlockLinks = ConvertMemToHuman(MemBytesBlockLinks);
       std::string SizeHumanMisc = ConvertMemToHuman(MemBytesMisc);
-      std::string SizeHumanJEMalloc = ConvertMemToHuman(MemBytesJEMalloc);
+      std::string SizeHumanFEXAllocator = ConvertMemToHuman(MemBytesFEXAllocator);
       std::string SizeHumanUnaccounted = ConvertMemToHuman(MemBytesUnaccounted);
       std::string SizeHumanLargestUnaccounted = ConvertMemToHuman(g_stats.MemStats.LargestAnon.Size);
 
@@ -619,8 +619,8 @@ void HandleMemstats(WINDOW *win, void* user_data) {
       mvwprintw(win, 7, 1,  "    Lookup L1 cache resident: %s\n", SizeHumanLookupL1.c_str());
       mvwprintw(win, 8, 1,  "    ThreadStates resident:    %s\n", SizeHumanThreadStates.c_str());
       mvwprintw(win, 9, 1,  "    BlockLinks resident:      %s\n", SizeHumanBlockLinks.c_str());
-      mvwprintw(win, 10, 1,  "          Misc resident:      %s\n", SizeHumanMisc.c_str());
-      mvwprintw(win, 11, 1, "    JEMalloc resident:        %s\n", SizeHumanJEMalloc.c_str());
+      mvwprintw(win, 10, 1,  "          Misc resident:     %s\n", SizeHumanMisc.c_str());
+      mvwprintw(win, 11, 1, "    FEXAllocator resident:    %s\n", SizeHumanFEXAllocator.c_str());
       mvwprintw(win, 12, 1, "    Unaccounted resident:     %s\n", SizeHumanUnaccounted.c_str());
       mvwprintw(win, 13, 1, "                 Largest:     %s [0x%lx, 0x%lx) - p (void*) memset(0x%lx, 0xFF, %ld)\n",
           SizeHumanLargestUnaccounted.c_str(), g_stats.MemStats.LargestAnon.Begin, g_stats.MemStats.LargestAnon.End, g_stats.MemStats.LargestAnon.Begin, g_stats.MemStats.LargestAnon.End - g_stats.MemStats.LargestAnon.Begin);
