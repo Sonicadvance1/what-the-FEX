@@ -556,15 +556,40 @@ void HandleHistogram(WINDOW *win, void* user_data) {
       }
       ++j;
     }
-  } else {
-    for (size_t i = 0; i < win_height; ++i) {
-      mvwhline(win, i, 0, ' ', win_width);
-    }
   }
 
   box(win, 0, 0);
   bool IsSelected = selected == WIN_INDEX;
   mvwprintw(win, 0, 1, "%lc %lc %s", Selected[IsSelected], CollapsedItem[WinCollapsed ? 1 : 0], WIN_NAME);
+}
+
+void HandleHistogramLegend(WINDOW *win, void* user_data) {
+  int offset {};
+  const auto pip_char = partial_pips[partial_pips.size() - 1];
+  struct data {
+    const char *name;
+    int attr;
+  };
+  std::array<data, 5> data_array = {{
+    {"Load", 0},
+    {"High Load", COLOR_ATTR_MAGENTA},
+    {"SMC", COLOR_ATTR_BLUE},
+    {"SIGBUS", COLOR_ATTR_CYAN},
+    {"SoftFP", COLOR_ATTR_GREEN},
+
+  }};
+
+  for (auto var : data_array) {
+    if (var.attr) {
+      wattron(win, COLOR_PAIR(var.attr));
+    }
+    mvwprintw(win, 0, offset, "%lc - %s |", pip_char, var.name);
+    offset += 4 + strlen(var.name) + 3;
+
+    if (var.attr) {
+      wattroff(win, COLOR_PAIR(var.attr));
+    }
+  }
 }
 
 void HandleMemstats(WINDOW *win, void* user_data) {
@@ -652,7 +677,7 @@ void HandleJITstats(WINDOW *win, void* user_data) {
   const auto WIN_NAME = "FEX JIT Stats";
   const bool WinCollapsed = Collapsed[WIN_INDEX];
   if (!WinCollapsed) {
-    g_stats.WinStackMgr.RequestNewHeight(WIN_INDEX, 26);
+    //g_stats.WinStackMgr.RequestNewHeight(WIN_INDEX, 26);
   } else if (WinCollapsed) {
     g_stats.WinStackMgr.RequestNewHeight(WIN_INDEX, 1);
   }
@@ -679,7 +704,7 @@ void HandleJITstats(WINDOW *win, void* user_data) {
     const auto AccumulatedCacheWriteLockTime = (double)(TotalThisPeriod.AccumulatedCacheWriteLockTime) / g_stats.cycle_counter_frequency_double;
     const auto AccumulatedJITCount = TotalThisPeriod.AccumulatedJITCount;
 
-    const auto MaxActiveThreads = std::min<size_t>(g_stats.sampled_stats.size(), std::min<size_t>(g_stats.hardware_concurrency, 32));
+    const auto MaxActiveThreads = std::min<size_t>(g_stats.sampled_stats.size(), std::min<size_t>(g_stats.hardware_concurrency, 12));
 
     mvwprintw(win, 1, 1, "Top %ld threads executing (%ld total)\n", g_stats.max_thread_loads.size(), threads_sampled);
 
@@ -790,6 +815,17 @@ void AppendGraphSubWin(WTF::WinStack *WinStackMgr, WINDOW *main) {
   });
 }
 
+void AppendHistogramLegendSubWin(WTF::WinStack *WinStackMgr, WINDOW *main) {
+  int lines = 1;
+  int cols = COLS;
+  int y = 0;
+  int x = 0;
+  auto win = subwin(main, lines, cols, y, x);
+  WinStackMgr->AddToStack(HandleHistogramLegend, win, nullptr, WTF::WinStack::Properties {
+    .Height = lines,
+  });
+}
+
 void AccumulateJITStats(JITStatsUserData &JITData, std::chrono::time_point<std::chrono::steady_clock> Now) {
   JITData.total_jit_time = {};
   JITData.threads_sampled = {};
@@ -873,8 +909,7 @@ void AccumulateJITStats(JITStatsUserData &JITData, std::chrono::time_point<std::
         // Arbitrary high_softloat at a million.
         .high_softfloat = JITData.TotalThisPeriod.FloatFallbackCount >= 1'000'000,
         });
-
- }
+  }
 
   g_stats.FirstLoop = false;
   g_stats.previous_sample_period = Now;
@@ -959,6 +994,8 @@ int main(int argc, char** argv) {
   AppendJITstatsSubWin(&g_stats.WinStackMgr, window, &JITData);
   AppendMemstatsSubWin(&g_stats.WinStackMgr, window);
   AppendGraphSubWin(&g_stats.WinStackMgr, window);
+  AppendHistogramLegendSubWin(&g_stats.WinStackMgr, window);
+
 
   while (true) {
     if (g_stats.pidfd_watch != -1) {
