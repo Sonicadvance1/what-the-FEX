@@ -221,6 +221,8 @@ static std::string ConvertMemToHuman(uint64_t MemBytes) {
   } else if (MemBytes >= 1024) {
     MemBytes /= 1024;
     Granule = "KiB";
+  } else {
+    Granule = "Bytes";
   }
   return std::format("{} {}", MemBytes, Granule);
 }
