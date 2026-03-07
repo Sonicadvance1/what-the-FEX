@@ -715,7 +715,7 @@ void HandleJITstats(WINDOW *win, void* user_data) {
     g_stats.empty_pip_data.resize(max_pips);
     std::fill(g_stats.empty_pip_data.begin(), g_stats.empty_pip_data.begin() + max_pips, partial_pips.front());
     size_t i = 0;
-    for (auto &thread_loads : std::ranges::reverse_view {g_stats.max_thread_loads}) {
+    for (auto &thread_loads : std::ranges::reverse_view {std::span{g_stats.max_thread_loads.begin(), MaxActiveThreads}}) {
       double thread_load = std::min(thread_loads.load_percentage, 100.0f);
       thread_loads.pip_data.resize(max_pips);
       double rounded_down = std::floor(thread_load / 10.0) * 10.0;
