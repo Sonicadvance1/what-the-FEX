@@ -707,7 +707,7 @@ void HandleJITstats(WINDOW *win, void* user_data) {
 
     const auto MaxActiveThreads = std::min<size_t>(g_stats.sampled_stats.size(), std::min<size_t>(g_stats.hardware_concurrency, 12));
 
-    mvwprintw(win, 1, 1, "Top %ld threads executing (%ld total)\n", g_stats.max_thread_loads.size(), threads_sampled);
+    mvwprintw(win, 1, 1, "Top %ld threads executing (%ld total)\n", MaxActiveThreads, threads_sampled);
 
     size_t max_pips = std::min(win_width, 50) - 2;
     double percentage_per_pip = 100.0 / (double)max_pips;
