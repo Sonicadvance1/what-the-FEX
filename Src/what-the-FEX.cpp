@@ -116,6 +116,23 @@ struct fex_stats {
     std::atomic<uint64_t> FEXAllocator {~0ULL};
     std::atomic<uint64_t> Unaccounted {~0ULL};
 
+    // Total resident
+    std::atomic<uint64_t> TotalAnonCount {~0ULL};
+
+    // JIT Code
+    std::atomic<uint64_t> JITCodeCount {~0ULL};
+    std::atomic<uint64_t> OpDispatcherCount {~0ULL};
+    std::atomic<uint64_t> FrontendCount {~0ULL};
+    std::atomic<uint64_t> CPUBackendCount {~0ULL};
+    std::atomic<uint64_t> LookupL2Count {~0ULL};
+    std::atomic<uint64_t> LookupL1Count {~0ULL};
+    std::atomic<uint64_t> ThreadStatesCount {~0ULL};
+    std::atomic<uint64_t> BlockLinksCount {~0ULL};
+    std::atomic<uint64_t> CallRetStacksCount {~0ULL};
+    std::atomic<uint64_t> MiscCount {~0ULL};
+    std::atomic<uint64_t> FEXAllocatorCount {~0ULL};
+    std::atomic<uint64_t> UnaccountedCount {~0ULL};
+
     struct LargestAnonType {
       uint64_t Begin, End;
       uint64_t Size;
@@ -222,9 +239,9 @@ static std::string ConvertMemToHuman(uint64_t MemBytes) {
     MemBytes /= 1024;
     Granule = "KiB";
   } else {
-    Granule = "Bytes";
+    Granule = "Byt";
   }
-  return std::format("{} {}", MemBytes, Granule);
+  return std::format("{:>10} {}", MemBytes, Granule);
 }
 
 static void ResidentFEXAnonSampling() {
@@ -265,10 +282,26 @@ static void ResidentFEXAnonSampling() {
     uint64_t TotalMiscResident{};
     uint64_t TotalFEXAllocator{};
     uint64_t TotalUnaccounted{};
+
+    uint64_t TotalResidentCount {};
+    uint64_t TotalJITResidentCount {};
+    uint64_t TotalOpDispatcherResidentCount {};
+    uint64_t TotalFrontendResidentCount {};
+    uint64_t TotalCPUBackendResidentCount {};
+    uint64_t TotalLookupL2ResidentCount {};
+    uint64_t TotalLookupL1ResidentCount {};
+    uint64_t TotalThreadStateResidentCount {};
+    uint64_t TotalBlockLinksResidentCount {};
+    uint64_t TotalCallRetStacksResidentCount {};
+    uint64_t TotalMiscResidentCount {};
+    uint64_t TotalFEXAllocatorCount {};
+    uint64_t TotalUnaccountedCount {};
+
     fex_stats::FEXMemStats::LargestAnonType LargestRSSAnon {};
 
     uint64_t Begin {}, End {};
     uint64_t *ActiveSubRegion {};
+    uint64_t *ActiveSubRegionCount {};
 
     std::istringstream ss(File);
     std::string Line;
@@ -279,27 +312,38 @@ static void ResidentFEXAnonSampling() {
 
         if (Line.find("FEXMemJIT") != Line.npos) {
           ActiveSubRegion = &TotalJITResident;
+          ActiveSubRegionCount = &TotalJITResidentCount;
         } else if (Line.find("FEXMem_OpDispatcher") != Line.npos) {
           ActiveSubRegion = &TotalOpDispatcherResident;
+          ActiveSubRegionCount = &TotalOpDispatcherResidentCount;
         } else if (Line.find("FEXMem_Frontend") != Line.npos) {
           ActiveSubRegion = &TotalFrontendResident;
+          ActiveSubRegionCount = &TotalFrontendResidentCount;
         } else if (Line.find("FEXMem_CPUBackend") != Line.npos) {
           ActiveSubRegion = &TotalCPUBackendResident;
+          ActiveSubRegionCount = &TotalCPUBackendResidentCount;
         } else if (Line.find("FEXMem_Lookup_L1") != Line.npos) {
           ActiveSubRegion = &TotalLookupL1Resident;
+          ActiveSubRegionCount = &TotalLookupL1ResidentCount;
         } else if (Line.find("FEXMem_Lookup") != Line.npos) {
           ActiveSubRegion = &TotalLookupL2Resident;
+          ActiveSubRegionCount = &TotalLookupL2ResidentCount;
         } else if (Line.find("FEXMem_ThreadState") != Line.npos) {
           ActiveSubRegion = &TotalThreadStateResident;
+          ActiveSubRegionCount = &TotalThreadStateResidentCount;
         } else if (Line.find("FEXMem_BlockLinks") != Line.npos) {
           ActiveSubRegion = &TotalBlockLinksResident;
+          ActiveSubRegionCount = &TotalBlockLinksResidentCount;
         } else if (Line.find("FEXMem_CallRetStacks") != Line.npos) {
           ActiveSubRegion = &TotalCallRetStacksResident;
+          ActiveSubRegionCount = &TotalCallRetStacksResidentCount;
         } else if (Line.find("FEXMem_Misc") != Line.npos) {
           ActiveSubRegion = &TotalMiscResident;
+          ActiveSubRegionCount = &TotalMiscResidentCount;
         } else {
           // Fully anonymous.
           ActiveSubRegion = &TotalUnaccounted;
+          ActiveSubRegionCount = &TotalUnaccountedCount;
         }
 
         continue;
@@ -307,6 +351,7 @@ static void ResidentFEXAnonSampling() {
 
       if (Line.find("JEMalloc") != Line.npos || Line.find("FEXAllocator") != Line.npos) {
         ActiveSubRegion = &TotalFEXAllocator;
+        ActiveSubRegionCount = &TotalFEXAllocatorCount;
         sscanf(Line.c_str(), "%lx-%lx", &Begin, &End);
         continue;
       }
@@ -327,6 +372,7 @@ static void ResidentFEXAnonSampling() {
         uint64_t ResidentInBytes = ConvertToBytes(SizeView, GranuleView);
         TotalResident += ResidentInBytes;
         *ActiveSubRegion += ResidentInBytes;
+        *ActiveSubRegionCount += 1;
 
         if (ActiveSubRegion == &TotalFEXAllocator) {
           if (LargestRSSAnon.Size < ResidentInBytes) {
@@ -357,6 +403,21 @@ static void ResidentFEXAnonSampling() {
       g_stats.MemStats.Misc.store(TotalMiscResident);
       g_stats.MemStats.FEXAllocator.store(TotalFEXAllocator);
       g_stats.MemStats.Unaccounted.store(TotalUnaccounted);
+
+
+      g_stats.MemStats.TotalAnonCount.store(TotalResidentCount);
+      g_stats.MemStats.JITCodeCount.store(TotalJITResidentCount);
+      g_stats.MemStats.OpDispatcherCount.store(TotalOpDispatcherResidentCount);
+      g_stats.MemStats.FrontendCount.store(TotalFrontendResidentCount);
+      g_stats.MemStats.CPUBackendCount.store(TotalCPUBackendResidentCount);
+      g_stats.MemStats.LookupL2Count.store(TotalLookupL2ResidentCount);
+      g_stats.MemStats.LookupL1Count.store(TotalLookupL1ResidentCount);
+      g_stats.MemStats.ThreadStatesCount.store(TotalThreadStateResidentCount);
+      g_stats.MemStats.BlockLinksCount.store(TotalBlockLinksResidentCount);
+      g_stats.MemStats.CallRetStacksCount.store(TotalCallRetStacksResidentCount);
+      g_stats.MemStats.MiscCount.store(TotalMiscResidentCount);
+      g_stats.MemStats.FEXAllocatorCount.store(TotalFEXAllocatorCount);
+      g_stats.MemStats.UnaccountedCount.store(TotalUnaccountedCount);
     }
     std::this_thread::sleep_for(SamplePeriod);
   }
@@ -607,23 +668,26 @@ void HandleMemstats(WINDOW *win, void* user_data) {
   struct Atomics {
     const char* Name;
     size_t Offset;
+    size_t OffsetCount;
   };
 
+#define off(x) offsetof(fex_stats::FEXMemStats, x), offsetof(fex_stats::FEXMemStats, x ## Count)
   constexpr std::array<Atomics, 13> atomics = {{
-    {"Total FEX Anon memory resident: %s\n", offsetof(fex_stats::FEXMemStats, TotalAnon)},
-    {"    JIT resident:             %s\n", offsetof(fex_stats::FEXMemStats, JITCode)},
-    {"    OpDispatcher resident:    %s\n", offsetof(fex_stats::FEXMemStats, OpDispatcher)},
-    {"    Frontend resident:        %s\n", offsetof(fex_stats::FEXMemStats, Frontend)},
-    {"    CPUBackend resident:      %s\n", offsetof(fex_stats::FEXMemStats, CPUBackend)},
-    {"    Lookup L2 cache resident: %s\n", offsetof(fex_stats::FEXMemStats, LookupL2)},
-    {"    Lookup L1 cache resident: %s\n", offsetof(fex_stats::FEXMemStats, LookupL1)},
-    {"    ThreadStates resident:    %s\n", offsetof(fex_stats::FEXMemStats, ThreadStates)},
-    {"    BlockLinks resident:      %s\n", offsetof(fex_stats::FEXMemStats, BlockLinks)},
-    {"    CallRetStacks resident:   %s\n", offsetof(fex_stats::FEXMemStats, CallRetStacks)},
-    {"    Misc resident:            %s\n", offsetof(fex_stats::FEXMemStats, Misc)},
-    {"    FEXAllocator resident:    %s\n", offsetof(fex_stats::FEXMemStats, FEXAllocator)},
-    {"    Unaccounted resident:     %s\n", offsetof(fex_stats::FEXMemStats, Unaccounted)},
+    {"Total FEX Anon memory resident: %s : (%d regions)\n", off(TotalAnon)},
+    {"    JIT resident:             %s : (%d regions)\n", off(JITCode)},
+    {"    OpDispatcher resident:    %s : (%d regions)\n", off(OpDispatcher)},
+    {"    Frontend resident:        %s : (%d regions)\n", off(Frontend)},
+    {"    CPUBackend resident:      %s : (%d regions)\n", off(CPUBackend)},
+    {"    Lookup L2 cache resident: %s : (%d regions)\n", off(LookupL2)},
+    {"    Lookup L1 cache resident: %s : (%d regions)\n", off(LookupL1)},
+    {"    ThreadStates resident:    %s : (%d regions)\n", off(ThreadStates)},
+    {"    BlockLinks resident:      %s : (%d regions)\n", off(BlockLinks)},
+    {"    CallRetStacks resident:   %s : (%d regions)\n", off(CallRetStacks)},
+    {"    Misc resident:            %s : (%d regions)\n", off(Misc)},
+    {"    FEXAllocator resident:    %s : (%d regions)\n", off(FEXAllocator)},
+    {"    Unaccounted resident:     %s : (%d regions)\n", off(Unaccounted)},
   }};
+#undef off
 
   constexpr static size_t TotalMemLines = atomics.size() + 1;
   if (!WinCollapsed) {
@@ -642,8 +706,10 @@ void HandleMemstats(WINDOW *win, void* user_data) {
       for (size_t i = 0; i < atomics.size(); ++i) {
         const auto& atomic_info = atomics[i];
         const auto Value = reinterpret_cast<std::atomic<uint64_t>*>(reinterpret_cast<uintptr_t>(&g_stats.MemStats) + atomic_info.Offset)->load();
+        const auto ValueCount = reinterpret_cast<std::atomic<uint64_t>*>(reinterpret_cast<uintptr_t>(&g_stats.MemStats) + atomic_info.OffsetCount)->load();
+
         const auto ValueName = ConvertMemToHuman(Value);
-        mvwprintw(win, i + 1, 1, atomic_info.Name, ValueName.c_str());
+        mvwprintw(win, i + 1, 1, atomic_info.Name, ValueName.c_str(), ValueCount);
       }
 
       const auto SizeHumanLargestUnaccounted = ConvertMemToHuman(g_stats.MemStats.LargestAnon.Size);
