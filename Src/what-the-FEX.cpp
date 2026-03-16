@@ -136,6 +136,9 @@ struct fex_stats {
     std::atomic<uint64_t> FEXAllocatorCount {~0ULL};
     std::atomic<uint64_t> UnaccountedCount {~0ULL};
 
+    // Application non-specific tracking
+    std::atomic<uint64_t> TotalAppResident {~0ULL};
+
     struct LargestAnonType {
       uint64_t Begin, End;
       uint64_t Size;
@@ -236,7 +239,7 @@ static uint64_t ConvertToBytes(std::string_view Size, std::string_view Granule) 
   return SizeBytes;
 }
 
-static std::string ConvertMemToHuman(uint64_t MemBytes) {
+static std::string ConvertMemToHuman(uint64_t MemBytes, size_t Padding = 10) {
   const char *Granule;
   if (MemBytes >= (1024 * 1024)) {
     MemBytes /= 1024 * 1024;
@@ -247,7 +250,7 @@ static std::string ConvertMemToHuman(uint64_t MemBytes) {
   } else {
     Granule = "Byt";
   }
-  return std::format("{:>10} {}", MemBytes, Granule);
+  return std::format("{:>{}} {}", MemBytes, Padding, Granule);
 }
 
 static void ResidentFEXAnonSampling() {
@@ -276,6 +279,7 @@ static void ResidentFEXAnonSampling() {
 
     // Parse the file by line.
     uint64_t TotalResident {};
+    uint64_t TotalAppResident {};
     uint64_t TotalJITResident {};
     uint64_t TotalOpDispatcherResident {};
     uint64_t TotalFrontendResident {};
@@ -367,7 +371,7 @@ static void ResidentFEXAnonSampling() {
         continue;
       }
 
-      if (ActiveSubRegion && Line.find("Rss") != Line.npos) {
+      if (Line.find("Rss") != Line.npos) {
         // Parse the residency for this mapped region and add it.
         // ex: `Rss:                 560 kB`
         auto GranuleIter = Line.find_last_of(' ') + 1;
@@ -376,19 +380,25 @@ static void ResidentFEXAnonSampling() {
         std::string_view GranuleView = std::string_view(&Line.at(GranuleIter));
         std::string_view SizeView = std::string_view(&Line.at(SizeIter), GranuleIter - SizeIter - 1);
         uint64_t ResidentInBytes = ConvertToBytes(SizeView, GranuleView);
-        TotalResident += ResidentInBytes;
-        *ActiveSubRegion += ResidentInBytes;
-        *ActiveSubRegionCount += 1;
 
-        if (ActiveSubRegion == &TotalFEXAllocator) {
-          if (LargestRSSAnon.Size < ResidentInBytes) {
-            LargestRSSAnon = {
-              .Begin = Begin,
-              .End = End,
-              .Size = ResidentInBytes,
-            };
+        if (ActiveSubRegion) {
+          TotalResident += ResidentInBytes;
+          *ActiveSubRegion += ResidentInBytes;
+          *ActiveSubRegionCount += 1;
+
+          if (ActiveSubRegion == &TotalFEXAllocator) {
+            if (LargestRSSAnon.Size < ResidentInBytes) {
+              LargestRSSAnon = {
+                .Begin = Begin,
+                .End = End,
+                .Size = ResidentInBytes,
+              };
+            }
           }
         }
+
+        // All RSS regions.
+        TotalAppResident += ResidentInBytes;
         continue;
       }
     }
@@ -425,6 +435,10 @@ static void ResidentFEXAnonSampling() {
       g_stats.MemStats.FEXAllocatorCount.store(TotalFEXAllocatorCount);
       g_stats.MemStats.UnaccountedCount.store(TotalUnaccountedCount);
     }
+
+    // Store the combined FEX and app resident.
+    g_stats.MemStats.TotalAppResident.store(TotalAppResident);
+
     std::this_thread::sleep_for(SamplePeriod);
   }
 
@@ -761,7 +775,10 @@ void HandleMemstats(WINDOW *win, void* user_data) {
 
   box(win, 0, 0);
   bool IsSelected = selected == WIN_INDEX;
-  mvwprintw(win, 0, 1, "%lc %lc %s", Selected[IsSelected], CollapsedItem[WinCollapsed ? 1 : 0], WIN_NAME);
+  auto AppResident = g_stats.MemStats.TotalAppResident.load();
+  const auto AppResidentName = ConvertMemToHuman(AppResident, 0);
+  const auto AppResidentWithoutFEX = ConvertMemToHuman(AppResident - g_stats.MemStats.TotalAnon.load(), 0);
+  mvwprintw(win, 0, 1, "%lc %lc %s : Total app resident: %s (without FEX: %s)", Selected[IsSelected], CollapsedItem[WinCollapsed ? 1 : 0], WIN_NAME, AppResidentName.c_str(), AppResidentWithoutFEX.c_str());
 }
 
 struct JITStatsUserData {
