@@ -678,6 +678,16 @@ void HandleHistogramLegend(WINDOW *win, void* user_data) {
   }};
 
   for (auto var : data_array) {
+    if (!var.attr) {
+      wattron(win, COLOR_PAIR(COLOR_ATTR_RED));
+      mvwprintw(win, 0, offset, "%lc", pip_char);
+      wattroff(win, COLOR_PAIR(COLOR_ATTR_RED));
+
+      wattron(win, COLOR_PAIR(COLOR_ATTR_YELLOW));
+      mvwprintw(win, 0, offset + 1, "%lc", pip_char);
+      wattroff(win, COLOR_PAIR(COLOR_ATTR_YELLOW));
+      offset += 2;
+    }
     if (var.attr) {
       wattron(win, COLOR_PAIR(var.attr));
     }
