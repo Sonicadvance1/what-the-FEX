@@ -58,7 +58,6 @@ struct fex_stats {
   const char *pid_str {};
   int pid {-1};
   int shm_fd {-1};
-  bool first_sample = true;
   uint32_t shm_size {};
   uint64_t cycle_counter_frequency {};
   double cycle_counter_frequency_double {};
@@ -70,14 +69,18 @@ struct fex_stats {
   size_t thread_stats_size_to_copy {};
 
   WTF::WinStack WinStackMgr;
+  uint64_t sample_period {};
 
   struct retained_stats {
     std::chrono::time_point<std::chrono::steady_clock> LastSeen;
     FEXCore::Profiler::ThreadStats PreviousStats {};
     FEXCore::Profiler::ThreadStats Stats {};
+    size_t sample_period {};
+    bool first {true};
   };
 
   std::chrono::time_point<std::chrono::steady_clock> previous_sample_period;
+  std::vector<FEXCore::Profiler::ThreadStats> max_stats_profiled {};
   std::map<uint32_t, retained_stats> sampled_stats;
 
   std::wstring empty_pip_data;
@@ -204,15 +207,18 @@ static void setup_signal_handler() {
 
 static void check_shm_update_necessary() {
   auto new_shm_size = g_stats.head->Size.load(std::memory_order_relaxed);
-  if (g_stats.shm_size != new_shm_size) {
-    // Remap!
-    munmap(g_stats.shm_base, g_stats.shm_size);
-    g_stats.shm_size = new_shm_size;
-    g_stats.shm_base = mmap(nullptr, new_shm_size, PROT_READ, MAP_SHARED, g_stats.shm_fd, 0);
+  if (g_stats.shm_size == new_shm_size) return;
 
-    // Update head pointer as well.
-    g_stats.head = reinterpret_cast<FEXCore::Profiler::ThreadStatsHeader*>(g_stats.shm_base);
-  }
+  // Remap!
+  munmap(g_stats.shm_base, g_stats.shm_size);
+  g_stats.shm_size = new_shm_size;
+  g_stats.shm_base = mmap(nullptr, new_shm_size, PROT_READ, MAP_SHARED, g_stats.shm_fd, 0);
+
+  // Update head pointer as well.
+  g_stats.head = reinterpret_cast<FEXCore::Profiler::ThreadStatsHeader*>(g_stats.shm_base);
+
+  const size_t max_stats_possible = g_stats.shm_size / g_stats.thread_stats_size_to_copy;
+  g_stats.max_stats_profiled.resize(max_stats_possible);
 }
 
 static uint64_t ConvertToBytes(std::string_view Size, std::string_view Granule) {
@@ -448,7 +454,7 @@ static std::string CustomPrintInteger(uint64_t Integer) {
 }
 
 static void SampleStats(std::chrono::steady_clock::time_point Now) {
-  auto AtomicCopyStats = [](FEXCore::Profiler::ThreadStats* Dest, FEXCore::Profiler::ThreadStats* Src, size_t Size) {
+  auto AtomicCopyStats = [](FEXCore::Profiler::ThreadStats* Dest, const FEXCore::Profiler::ThreadStats* Src, size_t Size) {
     // Take advantage of 16-byte alignment and single-copy atomicity of ARMv8.4.
 #if defined(__x86_64__) || defined(__i386__)
     using copy_type = __m128;
@@ -463,18 +469,42 @@ static void SampleStats(std::chrono::steady_clock::time_point Now) {
     }
   };
 
+  // Increment the sample period.
+  ++g_stats.sample_period;
+
+  // Sample in to a temporary vector first as fast as possible.
   uint32_t HeaderOffset = g_stats.head->Head;
+  size_t last_sampled_index = 0;
   while (HeaderOffset != 0) {
     if (HeaderOffset >= g_stats.shm_size) {
       break;
     }
-    FEXCore::Profiler::ThreadStats* Stat = StatFromOffset(g_stats.shm_base, HeaderOffset);
+    const FEXCore::Profiler::ThreadStats* Stat = StatFromOffset(g_stats.shm_base, HeaderOffset);
+    auto it = &g_stats.max_stats_profiled[last_sampled_index];
+    AtomicCopyStats(it, Stat, g_stats.thread_stats_size_to_copy);
 
-    auto it = &g_stats.sampled_stats[Stat->TID];
-    AtomicCopyStats(&it->Stats, Stat, g_stats.thread_stats_size_to_copy);
-    it->LastSeen = Now;
-
+    ++last_sampled_index;
     HeaderOffset = Stat->Next;
+  }
+
+  for (size_t i = 0; i < last_sampled_index; ++i) {
+    const auto Stat = &g_stats.max_stats_profiled[i];
+    auto it = g_stats.sampled_stats.try_emplace(Stat->TID);
+
+    // Retain old stats.
+    memcpy(&it.first->second.PreviousStats, &it.first->second.Stats, g_stats.thread_stats_size_to_copy);
+
+    // Copy in new stats.
+    memcpy(&it.first->second.Stats, Stat, g_stats.thread_stats_size_to_copy);
+
+    // State this sample period.
+    it.first->second.sample_period = g_stats.sample_period;
+
+    // Claim this was the first time sampled if inserted.
+    it.first->second.first = it.second;
+
+    // Detail when it was last seen so we can garbage collect it.
+    it.first->second.LastSeen = Now;
   }
 }
 
@@ -910,6 +940,22 @@ void AccumulateJITStats(JITStatsUserData &JITData, std::chrono::time_point<std::
 
 #define accumulate(dest, name) dest += Stat->name - PreviousStats->name
   for (auto it = g_stats.sampled_stats.begin(); it != g_stats.sampled_stats.end();) {
+    if (it->second.first) {
+      // If this is the first time the thread was sampled. skip it.
+      ++it;
+      continue;
+    } else if (it->second.sample_period != g_stats.sample_period) {
+      if ((Now - it->second.LastSeen) >= std::chrono::seconds(10)) {
+        // If the thread hasn't been seen for 10 seconds then remove it.
+        it = g_stats.sampled_stats.erase(it);
+      } else {
+        // If this thread wasn't sampled this period then skip it.
+        // Thread is likely dead.
+        ++it;
+      }
+      continue;
+    }
+
     ++JITData.threads_sampled;
     auto PreviousStats = &it->second.PreviousStats;
     auto Stat = &it->second.Stats;
@@ -930,13 +976,6 @@ void AccumulateJITStats(JITStatsUserData &JITData, std::chrono::time_point<std::
     accumulate(JITData.TotalThisPeriod.AccumulatedCacheWriteLockTime, AccumulatedCacheWriteLockTime);
     accumulate(JITData.TotalThisPeriod.AccumulatedJITCount, AccumulatedJITCount);
     JITData.TotalJITInvocations += Stat->AccumulatedJITCount;
-
-    memcpy(PreviousStats, Stat, g_stats.thread_stats_size_to_copy);
-
-    if ((Now - it->second.LastSeen) >= std::chrono::seconds(10)) {
-      it = g_stats.sampled_stats.erase(it);
-      continue;
-    }
 
     JITData.hottest_threads.emplace_back(total_time);
 
@@ -1045,6 +1084,10 @@ int main(int argc, char** argv) {
   if (g_stats.head->ThreadStatsSize) {
     g_stats.thread_stats_size_to_copy = std::min<size_t>(g_stats.head->ThreadStatsSize, g_stats.thread_stats_size_to_copy);
   }
+
+  // Setup initial sample buffer array.
+  const size_t max_stats_possible = g_stats.shm_size / g_stats.thread_stats_size_to_copy;
+  g_stats.max_stats_profiled.resize(max_stats_possible);
 
   g_stats.cycle_counter_frequency = get_cycle_counter_frequency();
   g_stats.cycle_counter_frequency_double = (double)g_stats.cycle_counter_frequency;
