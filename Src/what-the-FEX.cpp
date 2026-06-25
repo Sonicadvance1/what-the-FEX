@@ -1026,19 +1026,26 @@ void AccumulateJITStats(JITStatsUserData &JITData, std::chrono::time_point<std::
     const double MaximumCoresThreadsPossible = std::min(g_stats.hardware_concurrency, JITData.threads_sampled);
     JITData.fex_load = ((double)JITData.total_jit_time / (MaximumCyclesInSamplePeriod * MaximumCoresThreadsPossible)) * 100.0;
 
-    size_t minimum_hot_threads = std::min(g_stats.hardware_concurrency, JITData.hottest_threads.size());
+    const auto minimum_hot_threads = std::min<size_t>(JITData.hottest_threads.size(), std::min<size_t>(g_stats.hardware_concurrency, 12));
+
     // For the top thread-loads, we are only ever showing up to how many hardware threads are available.
     g_stats.max_thread_loads.resize(minimum_hot_threads);
+    bool high_single_threaded_load {};
     for (size_t i = 0; i < minimum_hot_threads; ++i) {
       g_stats.max_thread_loads[i].load_percentage = ((double)JITData.hottest_threads[i] / MaximumCyclesInSamplePeriod) * 100.0;
       g_stats.max_thread_loads[i].TotalCycles = JITData.hottest_threads[i];
+
+      // If a thread's single load is higher than a single 60hz frame, claim it's high load.
+      if (g_stats.max_thread_loads[i].load_percentage >= (1000.0 / 60.0)) {
+        high_single_threaded_load = true;
+      }
     }
 
     g_stats.fex_load_histogram.erase(g_stats.fex_load_histogram.begin());
     g_stats.fex_load_histogram.push_back(fex_stats::fex_histogram_data {
         .load_percentage = static_cast<float>(JITData.fex_load),
         // High JIT load if we had more than a core of JIT load.
-        .high_jit_load = JITData.total_jit_time >= MaximumCyclesInSamplePeriod,
+        .high_jit_load = JITData.total_jit_time >= MaximumCyclesInSamplePeriod || high_single_threaded_load,
         // Arbitrary check if SMC count was greater than 500
         .high_invalidation_or_smc = JITData.TotalThisPeriod.SMCCount >= 500,
         // Arbitrary SIGBUS count check.
