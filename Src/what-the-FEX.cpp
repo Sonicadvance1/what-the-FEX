@@ -503,6 +503,10 @@ static void SampleStats(std::chrono::steady_clock::time_point Now) {
 
   for (size_t i = 0; i < last_sampled_index; ++i) {
     const auto Stat = &g_stats.max_stats_profiled[i];
+
+    // Skip TID zero as invalid.
+    if (Stat->TID == 0) continue;
+
     auto it = g_stats.sampled_stats.try_emplace(Stat->TID);
 
     // Retain old stats.
