@@ -76,7 +76,6 @@ struct fex_stats {
     FEXCore::Profiler::ThreadStats PreviousStats {};
     FEXCore::Profiler::ThreadStats Stats {};
     size_t sample_period {};
-    bool first {true};
   };
 
   std::chrono::time_point<std::chrono::steady_clock> previous_sample_period;
@@ -518,8 +517,10 @@ static void SampleStats(std::chrono::steady_clock::time_point Now) {
     // State this sample period.
     it.first->second.sample_period = g_stats.sample_period;
 
-    // Claim this was the first time sampled if inserted.
-    it.first->second.first = it.second;
+    if (it.second) {
+      // If first time, just duplicate the sampled stats to be a zero load.
+      memcpy(&it.first->second.PreviousStats, Stat, g_stats.thread_stats_size_to_copy);
+    }
 
     // Detail when it was last seen so we can garbage collect it.
     it.first->second.LastSeen = Now;
@@ -842,7 +843,7 @@ void HandleJITstats(WINDOW *win, void* user_data) {
     g_stats.empty_pip_data.resize(max_pips);
     std::fill(g_stats.empty_pip_data.begin(), g_stats.empty_pip_data.begin() + max_pips, partial_pips.front());
     size_t i = 0;
-    for (auto &thread_loads : std::ranges::reverse_view {std::span{g_stats.max_thread_loads.begin(), MaxActiveThreads}}) {
+    for (auto &thread_loads : std::ranges::reverse_view {g_stats.max_thread_loads}) {
       double thread_load = std::min(thread_loads.load_percentage, 100.0f);
       thread_loads.pip_data.resize(max_pips);
       double rounded_down = std::floor(thread_load / 10.0) * 10.0;
@@ -971,11 +972,7 @@ void AccumulateJITStats(JITStatsUserData &JITData, std::chrono::time_point<std::
 
 #define accumulate(dest, name) dest += Stat->name - PreviousStats->name
   for (auto it = g_stats.sampled_stats.begin(); it != g_stats.sampled_stats.end();) {
-    if (it->second.first) {
-      // If this is the first time the thread was sampled. skip it.
-      ++it;
-      continue;
-    } else if (it->second.sample_period != g_stats.sample_period) {
+    if (it->second.sample_period != g_stats.sample_period) {
       if ((Now - it->second.LastSeen) >= std::chrono::seconds(10)) {
         // If the thread hasn't been seen for 10 seconds then remove it.
         it = g_stats.sampled_stats.erase(it);
@@ -1006,6 +1003,7 @@ void AccumulateJITStats(JITStatsUserData &JITData, std::chrono::time_point<std::
     accumulate(JITData.TotalThisPeriod.AccumulatedCacheReadLockTime, AccumulatedCacheReadLockTime);
     accumulate(JITData.TotalThisPeriod.AccumulatedCacheWriteLockTime, AccumulatedCacheWriteLockTime);
     accumulate(JITData.TotalThisPeriod.AccumulatedJITCount, AccumulatedJITCount);
+
     JITData.TotalJITInvocations += Stat->AccumulatedJITCount;
 
     JITData.hottest_threads.emplace_back(total_time);
