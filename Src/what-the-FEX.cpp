@@ -593,11 +593,17 @@ void HandleHistogram(WINDOW *win, void* user_data) {
   if (!WinCollapsed && win_height != 1) {
     const auto HistogramHeight = win_height - 2;
     size_t HistogramWidth = win_width - 2;
-    HistogramWidth = std::min(HistogramWidth, g_stats.fex_load_histogram.size());
+    if (HistogramWidth > g_stats.fex_load_histogram.size()) {
+      auto new_histogram = std::vector<fex_stats::fex_histogram_data>(HistogramWidth, fex_stats::DEFAULT_HISTO);
+      const auto new_elements = HistogramWidth - g_stats.fex_load_histogram.size();
+      memcpy(&new_histogram[new_elements], &g_stats.fex_load_histogram[0], g_stats.fex_load_histogram.size() * sizeof(g_stats.fex_load_histogram[0]));
+      g_stats.fex_load_histogram = std::move(new_histogram);
+    }
+    auto MinHistogramWidth = std::min(HistogramWidth, g_stats.fex_load_histogram.size());
 
     size_t j = 0;
 
-    for (auto& HistogramResult : std::ranges::reverse_view {g_stats.fex_load_histogram}) {
+    for (auto& HistogramResult : std::ranges::subrange {g_stats.fex_load_histogram.rbegin(), g_stats.fex_load_histogram.rbegin() + MinHistogramWidth}) {
       struct pip_stack_data {
         wchar_t pip;
         int attr {};
