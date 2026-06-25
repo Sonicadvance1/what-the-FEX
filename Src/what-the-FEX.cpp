@@ -883,7 +883,7 @@ void HandleJITstats(WINDOW *win, void* user_data) {
     mvwprintw(win, win_height - 9, 1,  "     SIGBUS Cnt: %ld (%lf per second)\n", SIGBUSCount, SIGBUS_Per_Second);
     mvwprintw(win, win_height - 8, 1,  "        SMC Cnt: %ld\n", SMCCount);
     mvwprintw(win, win_height - 7, 1,  "  Softfloat Cnt: %s\n", CustomPrintInteger(FloatFallbackCount).c_str());
-    mvwprintw(win, win_height - 6, 1,  "  CacheMiss Cnt: %ld (%lf per second) (%s total JIT invocations)\n", AccumulatedCacheMissCount, AccumulatedCacheMissCount_Per_Second, CustomPrintInteger(TotalJITInvocations).c_str());
+    mvwprintw(win, win_height - 6, 1,  " L1 CacheMisses: %ld (%lf per second) (%s total JIT invocations)\n", AccumulatedCacheMissCount, AccumulatedCacheMissCount_Per_Second, CustomPrintInteger(TotalJITInvocations).c_str());
     mvwprintw(win, win_height - 5, 1,  "    $RDLck Time: %f %s (%.2f percent)\n", AccumulatedCacheReadLockTime * Scale, ScaleStr, AccumulatedCacheReadLockTime / (double)MaxActiveThreads * 100.0);
     mvwprintw(win, win_height - 4, 1,  "    $WRLck Time: %f %s (%.2f percent)\n", AccumulatedCacheWriteLockTime * Scale, ScaleStr, AccumulatedCacheWriteLockTime / (double)MaxActiveThreads * 100.0);
     mvwprintw(win, win_height - 3, 1,  "        JIT Cnt: %ld (%lf percent)\n", AccumulatedJITCount, AccumulatedJITCount_Per_Second);
