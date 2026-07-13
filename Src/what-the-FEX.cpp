@@ -85,8 +85,9 @@ struct fex_stats {
   std::wstring empty_pip_data;
 
   struct max_thread_loads {
-    float load_percentage {};
     uint64_t TotalCycles {};
+    float load_percentage {};
+    int TID {};
     std::wstring pip_data {};
   };
   std::vector<max_thread_loads> max_thread_loads {};
@@ -794,7 +795,18 @@ void HandleMemstats(WINDOW *win, void* user_data) {
 
 struct JITStatsUserData {
   FEXCore::Profiler::ThreadStats TotalThisPeriod;
-  std::vector<uint64_t> hottest_threads;
+  struct hot_thread_data {
+    uint64_t Cycles;
+    int TID;
+    bool operator<(const hot_thread_data& rhs) const {
+      return Cycles < rhs.Cycles;
+    }
+
+    bool operator>(const hot_thread_data& rhs) const {
+      return Cycles > rhs.Cycles;
+    }
+  };
+  std::vector<hot_thread_data> hottest_threads;
   std::chrono::nanoseconds sample_period;
   size_t threads_sampled {};
   uint64_t total_jit_time {};
@@ -860,7 +872,7 @@ void HandleJITstats(WINDOW *win, void* user_data) {
       wmemset(thread_loads.pip_data.data() + full_pips, partial_pips[digit_percent], 1);
 
       const auto y_offset = 2 + i;
-      mvwprintw(win, y_offset, 1, "[%ls]: %.02f%% (%zd ms/S, %zd cycles)\n", g_stats.empty_pip_data.data(), thread_load, CyclesToMilliseconds(thread_loads.TotalCycles), thread_loads.TotalCycles);
+      mvwprintw(win, y_offset, 1, "[%ls]: %.02f%% (%zd ms/S, %zd cycles) - ID: %d\n", g_stats.empty_pip_data.data(), thread_load, CyclesToMilliseconds(thread_loads.TotalCycles), thread_loads.TotalCycles, thread_loads.TID);
       int attr = 0;
       if (thread_load >= 75.0) {
         attr = COLOR_ATTR_RED;
@@ -1012,12 +1024,12 @@ void AccumulateJITStats(JITStatsUserData &JITData, std::chrono::time_point<std::
 
     JITData.TotalJITInvocations += Stat->AccumulatedJITCount;
 
-    JITData.hottest_threads.emplace_back(total_time);
+    JITData.hottest_threads.emplace_back(total_time, Stat->TID);
 
     ++it;
   }
 
-  std::sort(JITData.hottest_threads.begin(), JITData.hottest_threads.end(), std::greater<uint64_t>());
+  std::sort(JITData.hottest_threads.begin(), JITData.hottest_threads.end(), std::greater<JITStatsUserData::hot_thread_data>());
 
   if (!g_stats.FirstLoop) {
     // Calculate loads based on the sample period that occurred.
@@ -1036,11 +1048,14 @@ void AccumulateJITStats(JITStatsUserData &JITData, std::chrono::time_point<std::
     g_stats.max_thread_loads.resize(minimum_hot_threads);
     bool high_single_threaded_load {};
     for (size_t i = 0; i < minimum_hot_threads; ++i) {
-      g_stats.max_thread_loads[i].load_percentage = ((double)JITData.hottest_threads[i] / MaximumCyclesInSamplePeriod) * 100.0;
-      g_stats.max_thread_loads[i].TotalCycles = JITData.hottest_threads[i];
+      auto &thread_data = g_stats.max_thread_loads[i];
+      const auto &incoming_thread_data = JITData.hottest_threads[i];
+      thread_data.load_percentage = ((double)incoming_thread_data.Cycles / MaximumCyclesInSamplePeriod) * 100.0;
+      thread_data.TotalCycles = incoming_thread_data.Cycles;
+      thread_data.TID = incoming_thread_data.TID;
 
       // If a thread's single load is higher than a single 60hz frame, claim it's high load.
-      if (g_stats.max_thread_loads[i].load_percentage >= (1000.0 / 60.0)) {
+      if (thread_data.load_percentage >= (1000.0 / 60.0)) {
         high_single_threaded_load = true;
       }
     }
