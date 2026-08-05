@@ -1,5 +1,5 @@
-pkgname=WTF
-pkgver=2606
+pkgname=fex-wtf
+pkgver=2608
 pkgrel=1
 pkgdesc='Tool for seeing FEX emulator stats'
 arch=(aarch64)
