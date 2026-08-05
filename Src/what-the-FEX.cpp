@@ -14,7 +14,9 @@
 #include <cstring>
 #include <cwchar>
 #include <fcntl.h>
+#include <filesystem>
 #include <locale.h>
+#include <limits.h>
 #include <map>
 #include <ranges>
 #include <sys/poll.h>
@@ -55,7 +57,6 @@ static const std::array<wchar_t, 10> partial_pips {
 constexpr double NanosecondsInSeconds = 1'000'000'000.0;
 
 struct fex_stats {
-  const char *pid_str {};
   int pid {-1};
   int shm_fd {-1};
   uint32_t shm_size {};
@@ -159,7 +160,7 @@ struct fex_stats {
 };
 
 auto SamplePeriod = std::chrono::milliseconds(1000);
-fex_stats g_stats {};
+std::optional<fex_stats> g_stats {};
 
 #ifndef __x86_64__
 uint64_t get_cycle_counter_frequency() {
@@ -209,19 +210,19 @@ static void setup_signal_handler() {
 }
 
 static void check_shm_update_necessary() {
-  auto new_shm_size = g_stats.head->Size.load(std::memory_order_relaxed);
-  if (g_stats.shm_size == new_shm_size) return;
+  auto new_shm_size = g_stats->head->Size.load(std::memory_order_relaxed);
+  if (g_stats->shm_size == new_shm_size) return;
 
   // Remap!
-  munmap(g_stats.shm_base, g_stats.shm_size);
-  g_stats.shm_size = new_shm_size;
-  g_stats.shm_base = mmap(nullptr, new_shm_size, PROT_READ, MAP_SHARED, g_stats.shm_fd, 0);
+  munmap(g_stats->shm_base, g_stats->shm_size);
+  g_stats->shm_size = new_shm_size;
+  g_stats->shm_base = mmap(nullptr, new_shm_size, PROT_READ, MAP_SHARED, g_stats->shm_fd, 0);
 
   // Update head pointer as well.
-  g_stats.head = reinterpret_cast<FEXCore::Profiler::ThreadStatsHeader*>(g_stats.shm_base);
+  g_stats->head = reinterpret_cast<FEXCore::Profiler::ThreadStatsHeader*>(g_stats->shm_base);
 
-  const size_t max_stats_possible = g_stats.shm_size / g_stats.thread_stats_size_to_copy;
-  g_stats.max_stats_profiled.resize(max_stats_possible);
+  const size_t max_stats_possible = g_stats->shm_size / g_stats->thread_stats_size_to_copy;
+  g_stats->max_stats_profiled.resize(max_stats_possible);
 }
 
 static uint64_t ConvertToBytes(std::string_view Size, std::string_view Granule) {
@@ -254,14 +255,14 @@ static std::string ConvertMemToHuman(uint64_t MemBytes, size_t Padding = 10) {
 }
 
 static void ResidentFEXAnonSampling() {
-  const auto fex_pid_smaps = std::format("/proc/{}/smaps", g_stats.pid);
+  const auto fex_pid_smaps = std::format("/proc/{}/smaps", g_stats->pid);
 
   const int smap_fd = open(fex_pid_smaps.c_str(), O_RDONLY);
 
   if (smap_fd == -1) return;
 
   std::string File{};
-  while (!g_stats.ShuttingDown.load()) {
+  while (!g_stats->ShuttingDown.load()) {
 
     // Read the full file again.
     File.clear();
@@ -404,40 +405,40 @@ static void ResidentFEXAnonSampling() {
     }
 
     if (TotalResident) {
-      g_stats.MemStats.LargestAnon = LargestRSSAnon;
+      g_stats->MemStats.LargestAnon = LargestRSSAnon;
 
-      g_stats.MemStats.TotalAnon.store(TotalResident);
-      g_stats.MemStats.JITCode.store(TotalJITResident);
-      g_stats.MemStats.OpDispatcher.store(TotalOpDispatcherResident);
-      g_stats.MemStats.Frontend.store(TotalFrontendResident);
-      g_stats.MemStats.CPUBackend.store(TotalCPUBackendResident);
-      g_stats.MemStats.LookupL2.store(TotalLookupL2Resident);
-      g_stats.MemStats.LookupL1.store(TotalLookupL1Resident);
-      g_stats.MemStats.ThreadStates.store(TotalThreadStateResident);
-      g_stats.MemStats.BlockLinks.store(TotalBlockLinksResident);
-      g_stats.MemStats.CallRetStacks.store(TotalCallRetStacksResident);
-      g_stats.MemStats.Misc.store(TotalMiscResident);
-      g_stats.MemStats.FEXAllocator.store(TotalFEXAllocator);
-      g_stats.MemStats.Unaccounted.store(TotalUnaccounted);
+      g_stats->MemStats.TotalAnon.store(TotalResident);
+      g_stats->MemStats.JITCode.store(TotalJITResident);
+      g_stats->MemStats.OpDispatcher.store(TotalOpDispatcherResident);
+      g_stats->MemStats.Frontend.store(TotalFrontendResident);
+      g_stats->MemStats.CPUBackend.store(TotalCPUBackendResident);
+      g_stats->MemStats.LookupL2.store(TotalLookupL2Resident);
+      g_stats->MemStats.LookupL1.store(TotalLookupL1Resident);
+      g_stats->MemStats.ThreadStates.store(TotalThreadStateResident);
+      g_stats->MemStats.BlockLinks.store(TotalBlockLinksResident);
+      g_stats->MemStats.CallRetStacks.store(TotalCallRetStacksResident);
+      g_stats->MemStats.Misc.store(TotalMiscResident);
+      g_stats->MemStats.FEXAllocator.store(TotalFEXAllocator);
+      g_stats->MemStats.Unaccounted.store(TotalUnaccounted);
 
 
-      g_stats.MemStats.TotalAnonCount.store(TotalResidentCount);
-      g_stats.MemStats.JITCodeCount.store(TotalJITResidentCount);
-      g_stats.MemStats.OpDispatcherCount.store(TotalOpDispatcherResidentCount);
-      g_stats.MemStats.FrontendCount.store(TotalFrontendResidentCount);
-      g_stats.MemStats.CPUBackendCount.store(TotalCPUBackendResidentCount);
-      g_stats.MemStats.LookupL2Count.store(TotalLookupL2ResidentCount);
-      g_stats.MemStats.LookupL1Count.store(TotalLookupL1ResidentCount);
-      g_stats.MemStats.ThreadStatesCount.store(TotalThreadStateResidentCount);
-      g_stats.MemStats.BlockLinksCount.store(TotalBlockLinksResidentCount);
-      g_stats.MemStats.CallRetStacksCount.store(TotalCallRetStacksResidentCount);
-      g_stats.MemStats.MiscCount.store(TotalMiscResidentCount);
-      g_stats.MemStats.FEXAllocatorCount.store(TotalFEXAllocatorCount);
-      g_stats.MemStats.UnaccountedCount.store(TotalUnaccountedCount);
+      g_stats->MemStats.TotalAnonCount.store(TotalResidentCount);
+      g_stats->MemStats.JITCodeCount.store(TotalJITResidentCount);
+      g_stats->MemStats.OpDispatcherCount.store(TotalOpDispatcherResidentCount);
+      g_stats->MemStats.FrontendCount.store(TotalFrontendResidentCount);
+      g_stats->MemStats.CPUBackendCount.store(TotalCPUBackendResidentCount);
+      g_stats->MemStats.LookupL2Count.store(TotalLookupL2ResidentCount);
+      g_stats->MemStats.LookupL1Count.store(TotalLookupL1ResidentCount);
+      g_stats->MemStats.ThreadStatesCount.store(TotalThreadStateResidentCount);
+      g_stats->MemStats.BlockLinksCount.store(TotalBlockLinksResidentCount);
+      g_stats->MemStats.CallRetStacksCount.store(TotalCallRetStacksResidentCount);
+      g_stats->MemStats.MiscCount.store(TotalMiscResidentCount);
+      g_stats->MemStats.FEXAllocatorCount.store(TotalFEXAllocatorCount);
+      g_stats->MemStats.UnaccountedCount.store(TotalUnaccountedCount);
     }
 
     // Store the combined FEX and app resident.
-    g_stats.MemStats.TotalAppResident.store(TotalAppResident);
+    g_stats->MemStats.TotalAppResident.store(TotalAppResident);
 
     std::this_thread::sleep_for(SamplePeriod);
   }
@@ -448,7 +449,7 @@ exit:
 
 static uint64_t CyclesToMilliseconds(uint64_t Cycles) {
   const double Cycles_f = Cycles;
-  const double CyclesPerMillisecond = g_stats.cycle_counter_frequency_double / 1000.0;
+  const double CyclesPerMillisecond = g_stats->cycle_counter_frequency_double / 1000.0;
   return Cycles_f / CyclesPerMillisecond;
 }
 
@@ -475,7 +476,7 @@ static void SampleStats(std::chrono::steady_clock::time_point Now) {
 #else
     using copy_type = __uint128_t;
 #endif
-    const auto elements_to_copy = g_stats.thread_stats_size_to_copy / sizeof(copy_type);
+    const auto elements_to_copy = g_stats->thread_stats_size_to_copy / sizeof(copy_type);
     auto d_i = reinterpret_cast<copy_type*>(Dest);
     auto s_i = reinterpret_cast<const copy_type*>(Src);
     for (size_t i = 0; i < elements_to_copy; ++i) {
@@ -484,43 +485,43 @@ static void SampleStats(std::chrono::steady_clock::time_point Now) {
   };
 
   // Increment the sample period.
-  ++g_stats.sample_period;
+  ++g_stats->sample_period;
 
   // Sample in to a temporary vector first as fast as possible.
-  uint32_t HeaderOffset = g_stats.head->Head;
+  uint32_t HeaderOffset = g_stats->head->Head;
   size_t last_sampled_index = 0;
   while (HeaderOffset != 0) {
-    if (HeaderOffset >= g_stats.shm_size) {
+    if (HeaderOffset >= g_stats->shm_size) {
       break;
     }
-    const FEXCore::Profiler::ThreadStats* Stat = StatFromOffset(g_stats.shm_base, HeaderOffset);
-    auto it = &g_stats.max_stats_profiled[last_sampled_index];
-    AtomicCopyStats(it, Stat, g_stats.thread_stats_size_to_copy);
+    const FEXCore::Profiler::ThreadStats* Stat = StatFromOffset(g_stats->shm_base, HeaderOffset);
+    auto it = &g_stats->max_stats_profiled[last_sampled_index];
+    AtomicCopyStats(it, Stat, g_stats->thread_stats_size_to_copy);
 
     ++last_sampled_index;
     HeaderOffset = Stat->Next;
   }
 
   for (size_t i = 0; i < last_sampled_index; ++i) {
-    const auto Stat = &g_stats.max_stats_profiled[i];
+    const auto Stat = &g_stats->max_stats_profiled[i];
 
     // Skip TID zero as invalid.
     if (Stat->TID == 0) continue;
 
-    auto it = g_stats.sampled_stats.try_emplace(Stat->TID);
+    auto it = g_stats->sampled_stats.try_emplace(Stat->TID);
 
     // Retain old stats.
-    memcpy(&it.first->second.PreviousStats, &it.first->second.Stats, g_stats.thread_stats_size_to_copy);
+    memcpy(&it.first->second.PreviousStats, &it.first->second.Stats, g_stats->thread_stats_size_to_copy);
 
     // Copy in new stats.
-    memcpy(&it.first->second.Stats, Stat, g_stats.thread_stats_size_to_copy);
+    memcpy(&it.first->second.Stats, Stat, g_stats->thread_stats_size_to_copy);
 
     // State this sample period.
-    it.first->second.sample_period = g_stats.sample_period;
+    it.first->second.sample_period = g_stats->sample_period;
 
     if (it.second) {
       // If first time, just duplicate the sampled stats to be a zero load.
-      memcpy(&it.first->second.PreviousStats, Stat, g_stats.thread_stats_size_to_copy);
+      memcpy(&it.first->second.PreviousStats, Stat, g_stats->thread_stats_size_to_copy);
     }
 
     // Detail when it was last seen so we can garbage collect it.
@@ -532,7 +533,7 @@ static int selected = 0;
 bool ToggleCollapsed {};
 bool Collapsed[3] {};
 
-void HandleSelectMove(int c) {
+bool HandleSelectMove(int c) {
   // TODO: Find a better way to update sample period.
   if (false) {
     if (c == KEY_UP) {
@@ -565,7 +566,11 @@ void HandleSelectMove(int c) {
   else if (c == KEY_RIGHT) {
     Collapsed[selected] ^= true;
     ToggleCollapsed = true;
+  } else if (c == 'q' || c == 27) {
+    return true;
   }
+
+  return false;
 }
 
 wchar_t Selected[2] = {
@@ -586,25 +591,25 @@ void HandleHistogram(WINDOW *win, void* user_data) {
   const auto WIN_NAME = "Total JIT usage";
   const bool WinCollapsed = Collapsed[WIN_INDEX];
   if (!WinCollapsed) {
-    g_stats.WinStackMgr.RequestNewHeight(WIN_INDEX, 12);
+    g_stats->WinStackMgr.RequestNewHeight(WIN_INDEX, 12);
   } else if (WinCollapsed) {
-    g_stats.WinStackMgr.RequestNewHeight(WIN_INDEX, 1);
+    g_stats->WinStackMgr.RequestNewHeight(WIN_INDEX, 1);
   }
 
   if (!WinCollapsed && win_height != 1) {
     const auto HistogramHeight = win_height - 2;
     size_t HistogramWidth = win_width - 2;
-    if (HistogramWidth > g_stats.fex_load_histogram.size()) {
+    if (HistogramWidth > g_stats->fex_load_histogram.size()) {
       auto new_histogram = std::vector<fex_stats::fex_histogram_data>(HistogramWidth, fex_stats::DEFAULT_HISTO);
-      const auto new_elements = HistogramWidth - g_stats.fex_load_histogram.size();
-      memcpy(&new_histogram[new_elements], &g_stats.fex_load_histogram[0], g_stats.fex_load_histogram.size() * sizeof(g_stats.fex_load_histogram[0]));
-      g_stats.fex_load_histogram = std::move(new_histogram);
+      const auto new_elements = HistogramWidth - g_stats->fex_load_histogram.size();
+      memcpy(&new_histogram[new_elements], &g_stats->fex_load_histogram[0], g_stats->fex_load_histogram.size() * sizeof(g_stats->fex_load_histogram[0]));
+      g_stats->fex_load_histogram = std::move(new_histogram);
     }
-    auto MinHistogramWidth = std::min(HistogramWidth, g_stats.fex_load_histogram.size());
+    auto MinHistogramWidth = std::min(HistogramWidth, g_stats->fex_load_histogram.size());
 
     size_t j = 0;
 
-    for (auto& HistogramResult : std::ranges::subrange {g_stats.fex_load_histogram.rbegin(), g_stats.fex_load_histogram.rbegin() + MinHistogramWidth}) {
+    for (auto& HistogramResult : std::ranges::subrange {g_stats->fex_load_histogram.rbegin(), g_stats->fex_load_histogram.rbegin() + MinHistogramWidth}) {
       struct pip_stack_data {
         wchar_t pip;
         int attr {};
@@ -757,13 +762,13 @@ void HandleMemstats(WINDOW *win, void* user_data) {
 
   constexpr static size_t TotalMemLines = atomics.size() + 1;
   if (!WinCollapsed) {
-    g_stats.WinStackMgr.RequestNewHeight(WIN_INDEX, TotalMemLines + 2);
+    g_stats->WinStackMgr.RequestNewHeight(WIN_INDEX, TotalMemLines + 2);
   } else if (WinCollapsed) {
-    g_stats.WinStackMgr.RequestNewHeight(WIN_INDEX, 1);
+    g_stats->WinStackMgr.RequestNewHeight(WIN_INDEX, 1);
   }
 
   if (!WinCollapsed) {
-    const uint64_t MemBytes = g_stats.MemStats.TotalAnon.load();
+    const uint64_t MemBytes = g_stats->MemStats.TotalAnon.load();
 
     if (MemBytes == ~0ULL) {
       mvwprintw(win, 1, 1, "Total FEX Anon memory resident: Couldn't detect\n");
@@ -771,25 +776,25 @@ void HandleMemstats(WINDOW *win, void* user_data) {
 
       for (size_t i = 0; i < atomics.size(); ++i) {
         const auto& atomic_info = atomics[i];
-        const auto Value = reinterpret_cast<std::atomic<uint64_t>*>(reinterpret_cast<uintptr_t>(&g_stats.MemStats) + atomic_info.Offset)->load();
-        const auto ValueCount = reinterpret_cast<std::atomic<uint64_t>*>(reinterpret_cast<uintptr_t>(&g_stats.MemStats) + atomic_info.OffsetCount)->load();
+        const auto Value = reinterpret_cast<std::atomic<uint64_t>*>(reinterpret_cast<uintptr_t>(&g_stats->MemStats) + atomic_info.Offset)->load();
+        const auto ValueCount = reinterpret_cast<std::atomic<uint64_t>*>(reinterpret_cast<uintptr_t>(&g_stats->MemStats) + atomic_info.OffsetCount)->load();
 
         const auto ValueName = ConvertMemToHuman(Value);
         mvwprintw(win, i + 1, 1, atomic_info.Name, ValueName.c_str(), ValueCount);
       }
 
-      const auto SizeHumanLargestUnaccounted = ConvertMemToHuman(g_stats.MemStats.LargestAnon.Size);
+      const auto SizeHumanLargestUnaccounted = ConvertMemToHuman(g_stats->MemStats.LargestAnon.Size);
 
       mvwprintw(win, atomics.size() + 1, 1, "                 Largest:     %s [0x%lx, 0x%lx) - p (void*) memset(0x%lx, 0xFF, %ld)\n",
-          SizeHumanLargestUnaccounted.c_str(), g_stats.MemStats.LargestAnon.Begin, g_stats.MemStats.LargestAnon.End, g_stats.MemStats.LargestAnon.Begin, g_stats.MemStats.LargestAnon.End - g_stats.MemStats.LargestAnon.Begin);
+          SizeHumanLargestUnaccounted.c_str(), g_stats->MemStats.LargestAnon.Begin, g_stats->MemStats.LargestAnon.End, g_stats->MemStats.LargestAnon.Begin, g_stats->MemStats.LargestAnon.End - g_stats->MemStats.LargestAnon.Begin);
     }
   }
 
   box(win, 0, 0);
   bool IsSelected = selected == WIN_INDEX;
-  auto AppResident = g_stats.MemStats.TotalAppResident.load();
+  auto AppResident = g_stats->MemStats.TotalAppResident.load();
   const auto AppResidentName = ConvertMemToHuman(AppResident, 0);
-  const auto AppResidentWithoutFEX = ConvertMemToHuman(AppResident - g_stats.MemStats.TotalAnon.load(), 0);
+  const auto AppResidentWithoutFEX = ConvertMemToHuman(AppResident - g_stats->MemStats.TotalAnon.load(), 0);
   mvwprintw(win, 0, 1, "%lc %lc %s : Total app resident: %s (without FEX: %s)", Selected[IsSelected], CollapsedItem[WinCollapsed ? 1 : 0], WIN_NAME, AppResidentName.c_str(), AppResidentWithoutFEX.c_str());
 }
 
@@ -824,9 +829,9 @@ void HandleJITstats(WINDOW *win, void* user_data) {
   const auto WIN_NAME = "FEX JIT Stats";
   const bool WinCollapsed = Collapsed[WIN_INDEX];
   if (!WinCollapsed) {
-    //g_stats.WinStackMgr.RequestNewHeight(WIN_INDEX, 26);
+    //g_stats->WinStackMgr.RequestNewHeight(WIN_INDEX, 26);
   } else if (WinCollapsed) {
-    g_stats.WinStackMgr.RequestNewHeight(WIN_INDEX, 1);
+    g_stats->WinStackMgr.RequestNewHeight(WIN_INDEX, 1);
   }
 
   if (!WinCollapsed) {
@@ -840,28 +845,28 @@ void HandleJITstats(WINDOW *win, void* user_data) {
     const auto& Scale = JITData->Scale;
     const auto& ScaleStr = JITData->ScaleStr;
 
-    const auto JITSeconds = (double)(TotalThisPeriod.AccumulatedJITTime) / g_stats.cycle_counter_frequency_double;
-    const auto SignalTime = (double)(TotalThisPeriod.AccumulatedSignalTime) / g_stats.cycle_counter_frequency_double;
+    const auto JITSeconds = (double)(TotalThisPeriod.AccumulatedJITTime) / g_stats->cycle_counter_frequency_double;
+    const auto SignalTime = (double)(TotalThisPeriod.AccumulatedSignalTime) / g_stats->cycle_counter_frequency_double;
 
     const auto SIGBUSCount = TotalThisPeriod.SIGBUSCount;
     const auto SMCCount = TotalThisPeriod.SMCCount;
     const auto FloatFallbackCount = TotalThisPeriod.FloatFallbackCount;
     const auto AccumulatedCacheMissCount = TotalThisPeriod.AccumulatedCacheMissCount;
-    const auto AccumulatedCacheReadLockTime = (double)(TotalThisPeriod.AccumulatedCacheReadLockTime) / g_stats.cycle_counter_frequency_double;
-    const auto AccumulatedCacheWriteLockTime = (double)(TotalThisPeriod.AccumulatedCacheWriteLockTime) / g_stats.cycle_counter_frequency_double;
+    const auto AccumulatedCacheReadLockTime = (double)(TotalThisPeriod.AccumulatedCacheReadLockTime) / g_stats->cycle_counter_frequency_double;
+    const auto AccumulatedCacheWriteLockTime = (double)(TotalThisPeriod.AccumulatedCacheWriteLockTime) / g_stats->cycle_counter_frequency_double;
     const auto AccumulatedJITCount = TotalThisPeriod.AccumulatedJITCount;
 
-    const auto MaxActiveThreads = std::min<size_t>(g_stats.sampled_stats.size(), std::min<size_t>(g_stats.hardware_concurrency, 12));
+    const auto MaxActiveThreads = std::min<size_t>(g_stats->sampled_stats.size(), std::min<size_t>(g_stats->hardware_concurrency, 12));
 
     mvwprintw(win, 1, 1, "Top %ld threads executing (%ld total)\n", MaxActiveThreads, threads_sampled);
 
     size_t max_pips = std::min(win_width, 50) - 2;
     double percentage_per_pip = 100.0 / (double)max_pips;
 
-    g_stats.empty_pip_data.resize(max_pips);
-    std::fill(g_stats.empty_pip_data.begin(), g_stats.empty_pip_data.begin() + max_pips, partial_pips.front());
+    g_stats->empty_pip_data.resize(max_pips);
+    std::fill(g_stats->empty_pip_data.begin(), g_stats->empty_pip_data.begin() + max_pips, partial_pips.front());
     size_t i = 0;
-    for (auto &thread_loads : std::ranges::reverse_view {g_stats.max_thread_loads}) {
+    for (auto &thread_loads : std::ranges::reverse_view {g_stats->max_thread_loads}) {
       double thread_load = std::min(thread_loads.load_percentage, 100.0f);
       thread_loads.pip_data.resize(max_pips);
       double rounded_down = std::floor(thread_load / 10.0) * 10.0;
@@ -872,7 +877,7 @@ void HandleJITstats(WINDOW *win, void* user_data) {
       wmemset(thread_loads.pip_data.data() + full_pips, partial_pips[digit_percent], 1);
 
       const auto y_offset = 2 + i;
-      mvwprintw(win, y_offset, 1, "[%ls]: %.02f%% (%zd ms/S, %zd cycles) - ID: %d\n", g_stats.empty_pip_data.data(), thread_load, CyclesToMilliseconds(thread_loads.TotalCycles), thread_loads.TotalCycles, thread_loads.TID);
+      mvwprintw(win, y_offset, 1, "[%ls]: %.02f%% (%zd ms/S, %zd cycles) - ID: %d\n", g_stats->empty_pip_data.data(), thread_load, CyclesToMilliseconds(thread_loads.TotalCycles), thread_loads.TotalCycles, thread_loads.TID);
       int attr = 0;
       if (thread_load >= 75.0) {
         attr = COLOR_ATTR_RED;
@@ -915,7 +920,7 @@ void HandleJITstats(WINDOW *win, void* user_data) {
     // <Box> + <Lines of text> + <Thread stats> + <Top %d threads executing text>
     const int Height = 2 + 11 + MaxActiveThreads + 1;
     if (Height != win_height) {
-      g_stats.WinStackMgr.RequestNewHeight(0, Height);
+      g_stats->WinStackMgr.RequestNewHeight(0, Height);
     }
   }
 
@@ -924,7 +929,7 @@ void HandleJITstats(WINDOW *win, void* user_data) {
   mvwprintw(win, 0, 1, "%lc %lc %s", Selected[IsSelected], CollapsedItem[WinCollapsed ? 1 : 0], WIN_NAME);
 
   char buffer[64];
-  int cx = snprintf(buffer, sizeof(buffer), "PID: %d", g_stats.pid);
+  int cx = snprintf(buffer, sizeof(buffer), "PID: %d", g_stats->pid);
 
   mvwprintw(win, 0, win_width - cx - 1, "%s", buffer);
 }
@@ -989,11 +994,11 @@ void AccumulateJITStats(JITStatsUserData &JITData, std::chrono::time_point<std::
   SampleStats(Now);
 
 #define accumulate(dest, name) dest += Stat->name - PreviousStats->name
-  for (auto it = g_stats.sampled_stats.begin(); it != g_stats.sampled_stats.end();) {
-    if (it->second.sample_period != g_stats.sample_period) {
+  for (auto it = g_stats->sampled_stats.begin(); it != g_stats->sampled_stats.end();) {
+    if (it->second.sample_period != g_stats->sample_period) {
       if ((Now - it->second.LastSeen) >= std::chrono::seconds(10)) {
         // If the thread hasn't been seen for 10 seconds then remove it.
-        it = g_stats.sampled_stats.erase(it);
+        it = g_stats->sampled_stats.erase(it);
       } else {
         // If this thread wasn't sampled this period then skip it.
         // Thread is likely dead.
@@ -1031,24 +1036,24 @@ void AccumulateJITStats(JITStatsUserData &JITData, std::chrono::time_point<std::
 
   std::sort(JITData.hottest_threads.begin(), JITData.hottest_threads.end(), std::greater<JITStatsUserData::hot_thread_data>());
 
-  if (!g_stats.FirstLoop) {
+  if (!g_stats->FirstLoop) {
     // Calculate loads based on the sample period that occurred.
     // FEX-Emu only counts cycles for the amount of time, so we need to calculate load based on the number of cycles that the sample period has.
-    JITData.sample_period = Now - g_stats.previous_sample_period;
+    JITData.sample_period = Now - g_stats->previous_sample_period;
 
     const double SamplePeriodNanoseconds = JITData.sample_period.count();
-    const double MaximumCyclesInSecond = g_stats.cycle_counter_frequency_double;
+    const double MaximumCyclesInSecond = g_stats->cycle_counter_frequency_double;
     const double MaximumCyclesInSamplePeriod = MaximumCyclesInSecond * (SamplePeriodNanoseconds / NanosecondsInSeconds);
-    const double MaximumCoresThreadsPossible = std::min(g_stats.hardware_concurrency, JITData.threads_sampled);
+    const double MaximumCoresThreadsPossible = std::min(g_stats->hardware_concurrency, JITData.threads_sampled);
     JITData.fex_load = ((double)JITData.total_jit_time / (MaximumCyclesInSamplePeriod * MaximumCoresThreadsPossible)) * 100.0;
 
-    const auto minimum_hot_threads = std::min<size_t>(JITData.hottest_threads.size(), std::min<size_t>(g_stats.hardware_concurrency, 12));
+    const auto minimum_hot_threads = std::min<size_t>(JITData.hottest_threads.size(), std::min<size_t>(g_stats->hardware_concurrency, 12));
 
     // For the top thread-loads, we are only ever showing up to how many hardware threads are available.
-    g_stats.max_thread_loads.resize(minimum_hot_threads);
+    g_stats->max_thread_loads.resize(minimum_hot_threads);
     bool high_single_threaded_load {};
     for (size_t i = 0; i < minimum_hot_threads; ++i) {
-      auto &thread_data = g_stats.max_thread_loads[i];
+      auto &thread_data = g_stats->max_thread_loads[i];
       const auto &incoming_thread_data = JITData.hottest_threads[i];
       thread_data.load_percentage = ((double)incoming_thread_data.Cycles / MaximumCyclesInSamplePeriod) * 100.0;
       thread_data.TotalCycles = incoming_thread_data.Cycles;
@@ -1060,8 +1065,8 @@ void AccumulateJITStats(JITStatsUserData &JITData, std::chrono::time_point<std::
       }
     }
 
-    g_stats.fex_load_histogram.erase(g_stats.fex_load_histogram.begin());
-    g_stats.fex_load_histogram.push_back(fex_stats::fex_histogram_data {
+    g_stats->fex_load_histogram.erase(g_stats->fex_load_histogram.begin());
+    g_stats->fex_load_histogram.push_back(fex_stats::fex_histogram_data {
         .load_percentage = static_cast<float>(JITData.fex_load),
         // High JIT load if we had more than a core of JIT load.
         .high_jit_load = JITData.total_jit_time >= MaximumCyclesInSamplePeriod || high_single_threaded_load,
@@ -1074,41 +1079,14 @@ void AccumulateJITStats(JITStatsUserData &JITData, std::chrono::time_point<std::
         });
   }
 
-  g_stats.FirstLoop = false;
-  g_stats.previous_sample_period = Now;
+  g_stats->FirstLoop = false;
+  g_stats->previous_sample_period = Now;
 }
 
-int main(int argc, char** argv) {
-  if (argc < 2) {
-    printf("usage: %s [options] <pid>\n", argv[0]);
-    return 0;
-  }
-  g_stats.pid_str = argv[argc - 1];
-  g_stats.pid = strtol(g_stats.pid_str, nullptr, 10);
-
-  setup_signal_handler();
-
-  const auto fex_shm = std::format("fex-{}-stats", g_stats.pid_str);
-  g_stats.shm_fd = shm_open(fex_shm.c_str(), O_RDONLY, 0);
-  if (g_stats.shm_fd == -1) {
-    printf("%s doesn't seem to exist\n", fex_shm.c_str());
-    return 1;
-  }
-
-  struct stat buf {};
-  if (fstat(g_stats.shm_fd, &buf) == -1) {
-    printf("Couldn't stat\n");
-    return 1;
-  }
-
-  if (buf.st_size < sizeof(uint64_t) * 4) {
-    printf("Buffer was too small: %ld\n", buf.st_size);
-    return 1;
-  }
-
-  g_stats.pidfd_watch = ::syscall(SYS_pidfd_open, g_stats.pid, 0);
+WINDOW* init_screen() {
   setlocale(LC_ALL, "");
   auto window = initscr();
+  nonl();
   nodelay(window, true);
   keypad(window, true);
   start_color();
@@ -1119,55 +1097,200 @@ int main(int argc, char** argv) {
   init_pair(COLOR_ATTR_CYAN, COLOR_CYAN, COLOR_BLACK);
   init_pair(COLOR_ATTR_GREEN, COLOR_GREEN, COLOR_BLACK);
 
-  g_stats.shm_size = buf.st_size;
-  g_stats.shm_base = mmap(nullptr, g_stats.shm_size, PROT_READ, MAP_SHARED, g_stats.shm_fd, 0);
-  g_stats.head = reinterpret_cast<FEXCore::Profiler::ThreadStatsHeader*>(g_stats.shm_base);
+  return window;
+}
 
-  std::string fex_version {g_stats.head->fex_version, strnlen(g_stats.head->fex_version, sizeof(g_stats.head->fex_version))};
+ssize_t LoadFileToBuffer(const std::string& Filepath, std::span<char> Buffer) {
+  int FD = open(Filepath.c_str(), O_RDONLY);
+
+  if (FD == -1) {
+    return -1;
+  }
+
+  ssize_t Read = pread(FD, Buffer.data(), Buffer.size(), 0);
+  close(FD);
+  return Read;
+}
+
+int user_select_pid(WINDOW *window) {
+  struct PIDInfo {
+    int pid {-1};
+    std::string comm;
+
+    bool operator<(const PIDInfo& rhs) const {
+      return pid < rhs.pid;
+    }
+
+    bool operator>(const PIDInfo& rhs) const {
+      return pid > rhs.pid;
+    }
+  };
+
+  auto get_fex_shms = []() {
+    std::vector<PIDInfo> info {};
+    std::error_code ec;
+    for (const auto& Entry : std::filesystem::directory_iterator("/dev/shm/", ec)) {
+      // Path - `/dev/shm/fex-2495179-stats`
+      if (!Entry.is_regular_file()) {
+        continue;
+      }
+
+      auto path = Entry.path().filename();
+      auto filename_str = path.string();
+      if (!filename_str.starts_with("fex-") && !filename_str.ends_with("-stats")) {
+        continue;
+      }
+      int pid {};
+
+      sscanf(filename_str.c_str(), "fex-%d-stats", &pid);
+
+      const auto procfs_path_comm = std::format("/proc/{}/comm", pid);
+      std::string comm_name;
+      comm_name.resize(128);
+      auto loaded = LoadFileToBuffer(procfs_path_comm, comm_name);
+      if (loaded == -1) {
+        // Okay, it doesn't exist? Just delete it to clean up.
+        std::filesystem::remove(path, ec);
+        continue;
+      }
+      if (comm_name[loaded - 1] == '\n') {
+        loaded -= 1;
+      }
+      comm_name.resize(loaded);
+
+      info.emplace_back(PIDInfo {
+          .pid = pid,
+          .comm = comm_name,
+      });
+    }
+    return info;
+  };
+
+  int selected {};
+
+  auto handle_key = [&](int c, size_t max) -> bool {
+    if (c == KEY_UP) {
+      --selected;
+    } else if (c == KEY_DOWN) {
+      ++selected;
+    } else if (c == '\r' || c == '\n' || c == ' ') {
+      return true;
+    } else if (c == 'q' || c == 27) {
+      selected = -1;
+      return true;
+    }
+
+    if (selected < 0) {
+      selected = 0;
+    } else if (selected >= max) {
+      selected = max - 1;
+    }
+
+    return false;
+  };
+
+  while (true) {
+    touchwin(window);
+
+    auto info = get_fex_shms();
+
+    std::sort(info.begin(), info.end(), std::greater<PIDInfo>());
+
+    mvwprintw(window, 0, 0, "=== Select a PID ===");
+    for (size_t i = 0; i < info.size(); ++i) {
+      mvwprintw(window, i + 1, 3, "PID: %8d: '%s'", info[i].pid, info[i].comm.c_str());
+    }
+
+    for (size_t i = 0; i < info.size(); ++i) {
+      mvwprintw(window, i + 1, 0, " %c ", selected == i ? '*' : ' ');
+    }
+
+    // Move cursor
+    wmove(window, selected + 1, 1);
+
+    int c = wgetch(window);
+    if (handle_key(c, info.size())) {
+      if (selected < 0) return -1;
+
+      return info[selected].pid;
+    }
+    refresh();
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+
+  return -1;
+}
+
+std::pair<const char*, int> run_it(WINDOW* window, int pid) {
+  const auto fex_shm = std::format("fex-{}-stats", g_stats->pid);
+  g_stats->shm_fd = shm_open(fex_shm.c_str(), O_RDONLY, 0);
+  if (g_stats->shm_fd == -1) {
+    printf("%s doesn't seem to exist\n", fex_shm.c_str());
+    return {nullptr, 1};
+  }
+
+  struct stat buf {};
+  if (fstat(g_stats->shm_fd, &buf) == -1) {
+    printf("Couldn't stat\n");
+    return {nullptr, 1};
+  }
+
+  if (buf.st_size < sizeof(uint64_t) * 4) {
+    printf("Buffer was too small: %ld\n", buf.st_size);
+    return {nullptr, 1};
+  }
+
+  g_stats->pidfd_watch = ::syscall(SYS_pidfd_open, g_stats->pid, 0);
+
+  g_stats->shm_size = buf.st_size;
+  g_stats->shm_base = mmap(nullptr, g_stats->shm_size, PROT_READ, MAP_SHARED, g_stats->shm_fd, 0);
+  g_stats->head = reinterpret_cast<FEXCore::Profiler::ThreadStatsHeader*>(g_stats->shm_base);
+
+  std::string fex_version {g_stats->head->fex_version, strnlen(g_stats->head->fex_version, sizeof(g_stats->head->fex_version))};
 
   store_memory_barrier();
-  printw("Header for PID %d:\n", g_stats.pid);
-  printw("  Version: 0x%x\n", g_stats.head->Version);
-  printw("  Type: %s\n", GetAppType(g_stats.head->app_type));
+  printw("Header for PID %d:\n", g_stats->pid);
+  printw("  Version: 0x%x\n", g_stats->head->Version);
+  printw("  Type: %s\n", GetAppType(g_stats->head->app_type));
   printw("  Fex: %s\n", fex_version.c_str());
-  printw("  Head: 0x%x\n", g_stats.head->Head.load(std::memory_order_relaxed));
-  printw("  Size: 0x%x\n", g_stats.head->Size.load(std::memory_order_relaxed));
+  printw("  Head: 0x%x\n", g_stats->head->Head.load(std::memory_order_relaxed));
+  printw("  Size: 0x%x\n", g_stats->head->Size.load(std::memory_order_relaxed));
 
-  if (g_stats.head->Version != FEXCore::Profiler::STATS_VERSION) {
+  if (g_stats->head->Version != FEXCore::Profiler::STATS_VERSION) {
     exit_screen("Unhandled FEX stats version\n");
   }
 
-  g_stats.thread_stats_size_to_copy = sizeof(FEXCore::Profiler::ThreadStats);
-  if (g_stats.head->ThreadStatsSize) {
-    g_stats.thread_stats_size_to_copy = std::min<size_t>(g_stats.head->ThreadStatsSize, g_stats.thread_stats_size_to_copy);
+  g_stats->thread_stats_size_to_copy = sizeof(FEXCore::Profiler::ThreadStats);
+  if (g_stats->head->ThreadStatsSize) {
+    g_stats->thread_stats_size_to_copy = std::min<size_t>(g_stats->head->ThreadStatsSize, g_stats->thread_stats_size_to_copy);
   }
 
   // Setup initial sample buffer array.
-  const size_t max_stats_possible = g_stats.shm_size / g_stats.thread_stats_size_to_copy;
-  g_stats.max_stats_profiled.resize(max_stats_possible);
+  const size_t max_stats_possible = g_stats->shm_size / g_stats->thread_stats_size_to_copy;
+  g_stats->max_stats_profiled.resize(max_stats_possible);
 
-  g_stats.cycle_counter_frequency = get_cycle_counter_frequency();
-  g_stats.cycle_counter_frequency_double = (double)g_stats.cycle_counter_frequency;
+  g_stats->cycle_counter_frequency = get_cycle_counter_frequency();
+  g_stats->cycle_counter_frequency_double = (double)g_stats->cycle_counter_frequency;
 
-  g_stats.hardware_concurrency = std::thread::hardware_concurrency();
-  g_stats.max_thread_loads.reserve(g_stats.hardware_concurrency);
+  g_stats->hardware_concurrency = std::thread::hardware_concurrency();
+  g_stats->max_thread_loads.reserve(g_stats->hardware_concurrency);
 
   std::thread ResidentAnonThread {ResidentFEXAnonSampling};
 
   const char *ExitString {};
+  int ExitCode {};
 
   JITStatsUserData JITData {};
 
-  AppendJITstatsSubWin(&g_stats.WinStackMgr, window, &JITData);
-  AppendMemstatsSubWin(&g_stats.WinStackMgr, window);
-  AppendGraphSubWin(&g_stats.WinStackMgr, window);
-  AppendHistogramLegendSubWin(&g_stats.WinStackMgr, window);
-
+  AppendJITstatsSubWin(&g_stats->WinStackMgr, window, &JITData);
+  AppendMemstatsSubWin(&g_stats->WinStackMgr, window);
+  AppendGraphSubWin(&g_stats->WinStackMgr, window);
+  AppendHistogramLegendSubWin(&g_stats->WinStackMgr, window);
 
   while (true) {
-    if (g_stats.pidfd_watch != -1) {
+    if (g_stats->pidfd_watch != -1) {
       pollfd fd {
-        .fd = g_stats.pidfd_watch,
+        .fd = g_stats->pidfd_watch,
         .events = POLLIN | POLLHUP,
         .revents = 0,
       };
@@ -1175,13 +1298,14 @@ int main(int argc, char** argv) {
       if (Res == 1) {
         if (fd.revents & POLLHUP) {
           ExitString = "FEX process exited\n";
+          ExitCode = 0;
           goto exit;
         }
       }
     }
 
     auto Now = std::chrono::steady_clock::now();
-    auto CurrentSamples = (Now - g_stats.previous_sample_period);
+    auto CurrentSamples = (Now - g_stats->previous_sample_period);
     if (CurrentSamples >= SamplePeriod) {
       // Say our remaining sample is max wait.
       CurrentSamples = std::chrono::milliseconds(10);
@@ -1190,14 +1314,18 @@ int main(int argc, char** argv) {
 
     if (ToggleCollapsed) {
       ToggleCollapsed = false;
-      g_stats.WinStackMgr.ClearWindowStack();
+      g_stats->WinStackMgr.ClearWindowStack();
     }
     touchwin(window);
-    g_stats.WinStackMgr.UpdateWindowDimensions();
-    g_stats.WinStackMgr.RunStack();
+    g_stats->WinStackMgr.UpdateWindowDimensions();
+    g_stats->WinStackMgr.RunStack();
 
     int c = wgetch(window);
-    HandleSelectMove(c);
+    if (HandleSelectMove(c)) {
+      ExitString = nullptr;
+      ExitCode = 1;
+      goto exit;
+    }
     refresh();
 
     // We want to sleep for at most 10ms. But because our sample period and our loop period is a difference cadence...
@@ -1205,10 +1333,56 @@ int main(int argc, char** argv) {
   }
 
 exit:
-  g_stats.ShuttingDown = true;
-  close(g_stats.shm_fd);
-  close(g_stats.pidfd_watch);
+  g_stats->ShuttingDown = true;
+  close(g_stats->shm_fd);
+  close(g_stats->pidfd_watch);
   ResidentAnonThread.join();
-  exit_screen(ExitString);
+  return {ExitString, ExitCode};
+}
+
+int main(int argc, char** argv) {
+  auto window = init_screen();
+
+  int64_t pid {-1};
+  bool runtime_selected_pid {};
+  if (argc < 2) {
+    runtime_selected_pid = true;
+  } else {
+    pid = strtol(argv[argc - 1], nullptr, 10);
+    if (pid == 0 || pid == LONG_MAX || pid == LONG_MIN) {
+      pid = -1;
+    }
+  }
+
+  do {
+    // Reset stats
+    g_stats.emplace();
+
+    if (runtime_selected_pid) {
+      pid = user_select_pid(window);
+    }
+
+    if (pid == -1) {
+      exit_screen("exiting\n");
+      return 0;
+    }
+
+    g_stats->pid = pid;
+
+    setup_signal_handler();
+
+    auto res = run_it(window, pid);
+
+    if (res.second == 0) {
+      exit_screen(res.first);
+      return res.second;
+    }
+
+    // Erase everything
+    clear();
+
+  } while (runtime_selected_pid);
+
+  exit_screen(nullptr);
   return 0;
 }
