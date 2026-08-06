@@ -149,6 +149,7 @@ struct fex_stats {
   FEXMemStats MemStats;
 
   std::atomic<bool> ShuttingDown {};
+  std::atomic<bool> SleepMemorySampling {};
 
   int pidfd_watch {-1};
 
@@ -263,6 +264,12 @@ static void ResidentFEXAnonSampling() {
 
   std::string File{};
   while (!g_stats->ShuttingDown.load()) {
+    if (g_stats->SleepMemorySampling.load()) {
+      // If asked to sleep then skip sampling.
+      // Sampling smaps causes VM locks in the kernel which causes stutter.
+      std::this_thread::sleep_for(SamplePeriod);
+      continue;
+    }
 
     // Read the full file again.
     File.clear();
@@ -766,6 +773,9 @@ void HandleMemstats(WINDOW *win, void* user_data) {
   } else if (WinCollapsed) {
     g_stats->WinStackMgr.RequestNewHeight(WIN_INDEX, 1);
   }
+
+  // Sleep the memory sampling if the window is collapsed.
+  g_stats->SleepMemorySampling = WinCollapsed;
 
   if (!WinCollapsed) {
     const uint64_t MemBytes = g_stats->MemStats.TotalAnon.load();
@@ -1351,6 +1361,7 @@ std::pair<const char*, int> run_it(WINDOW* window, int pid) {
 
 exit:
   g_stats->ShuttingDown = true;
+  g_stats->SleepMemorySampling = false;
   close(g_stats->shm_fd);
   close(g_stats->pidfd_watch);
   ResidentAnonThread.join();
@@ -1371,6 +1382,8 @@ int main(int argc, char** argv) {
     }
   }
 
+  setup_signal_handler();
+
   do {
     // Reset stats
     g_stats.emplace();
@@ -1385,8 +1398,6 @@ int main(int argc, char** argv) {
     }
 
     g_stats->pid = pid;
-
-    setup_signal_handler();
 
     auto res = run_it(window, pid);
 
