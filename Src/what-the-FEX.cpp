@@ -1208,12 +1208,18 @@ int user_select_pid(WINDOW *window) {
     (uint32_t)'/' << 8 |
     (uint32_t)'-' << 0;
   uint32_t RotateDivisor = 100;
-  while (true) {
-    touchwin(window);
 
+  size_t last_size {};
+  while (true) {
     auto info = get_fex_shms();
 
     std::sort(info.begin(), info.end(), std::greater<PIDInfo>());
+
+    if (last_size != info.size()) {
+      clear();
+      touchwin(window);
+      last_size = info.size();
+    }
 
     if (info.empty()) {
       mvwprintw(window, 0, 0, "=== No detected FEX === Scanning: %c%c%c%c", (char)(Movement >> 24), (char)(Movement >> 16), (char)(Movement >> 8), (char)(Movement >> 0) );
@@ -1404,7 +1410,7 @@ int main(int argc, char** argv) {
 
     auto res = run_it(window, pid);
 
-    if (res.second == 0) {
+    if (res.second == 0 && !runtime_selected_pid) {
       exit_screen(res.first);
       return res.second;
     }
