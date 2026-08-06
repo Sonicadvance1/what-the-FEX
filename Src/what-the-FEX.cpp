@@ -155,6 +155,11 @@ struct fex_stats {
 
   bool FirstLoop = true;
 
+  // Window tracking information
+  int selected = 0;
+  bool ToggleCollapsed {};
+  bool Collapsed[3] {};
+
   constexpr static fex_histogram_data DEFAULT_HISTO = {};
   fex_stats()
     : fex_load_histogram(200, DEFAULT_HISTO) {}
@@ -536,10 +541,6 @@ static void SampleStats(std::chrono::steady_clock::time_point Now) {
   }
 }
 
-static int selected = 0;
-bool ToggleCollapsed {};
-bool Collapsed[3] {};
-
 bool HandleSelectMove(int c) {
   // TODO: Find a better way to update sample period.
   if (false) {
@@ -561,17 +562,17 @@ bool HandleSelectMove(int c) {
   }
 
   if (c == KEY_UP) {
-    if (selected > 0) {
-      --selected;
+    if (g_stats->selected > 0) {
+      --g_stats->selected;
     }
   }
   else if (c == KEY_DOWN) {
-    if (selected < 2) {
-      ++selected;
+    if (g_stats->selected < 2) {
+      ++g_stats->selected;
     }
   } else if (c == '\r' || c == '\n' || c == ' ') {
-    Collapsed[selected] ^= true;
-    ToggleCollapsed = true;
+    g_stats->Collapsed[g_stats->selected] ^= true;
+    g_stats->ToggleCollapsed = true;
   } else if (c == 'q' || c == 27) {
     return true;
   }
@@ -595,7 +596,7 @@ void HandleHistogram(WINDOW *win, void* user_data) {
 
   const auto WIN_INDEX = 2;
   const auto WIN_NAME = "Total JIT usage";
-  const bool WinCollapsed = Collapsed[WIN_INDEX];
+  const bool WinCollapsed = g_stats->Collapsed[WIN_INDEX];
   if (!WinCollapsed) {
     g_stats->WinStackMgr.RequestNewHeight(WIN_INDEX, 12);
   } else if (WinCollapsed) {
@@ -694,7 +695,7 @@ void HandleHistogram(WINDOW *win, void* user_data) {
   }
 
   box(win, 0, 0);
-  bool IsSelected = selected == WIN_INDEX;
+  bool IsSelected = g_stats->selected == WIN_INDEX;
   mvwprintw(win, 0, 1, "%lc %lc %s", Selected[IsSelected], CollapsedItem[WinCollapsed ? 1 : 0], WIN_NAME);
 }
 
@@ -740,7 +741,7 @@ void HandleHistogramLegend(WINDOW *win, void* user_data) {
 void HandleMemstats(WINDOW *win, void* user_data) {
   const auto WIN_INDEX = 1;
   const auto WIN_NAME = "FEX Memory Usage";
-  const bool WinCollapsed = Collapsed[WIN_INDEX];
+  const bool WinCollapsed = g_stats->Collapsed[WIN_INDEX];
 
   struct Atomics {
     const char* Name;
@@ -800,7 +801,7 @@ void HandleMemstats(WINDOW *win, void* user_data) {
   }
 
   box(win, 0, 0);
-  bool IsSelected = selected == WIN_INDEX;
+  bool IsSelected = g_stats->selected == WIN_INDEX;
   auto AppResident = g_stats->MemStats.TotalAppResident.load();
   const auto AppResidentName = ConvertMemToHuman(AppResident, 0);
   const auto AppResidentWithoutFEX = ConvertMemToHuman(AppResident - g_stats->MemStats.TotalAnon.load(), 0);
@@ -840,7 +841,7 @@ void HandleJITstats(WINDOW *win, void* user_data) {
 
   const auto WIN_INDEX = 0;
   const auto WIN_NAME = "FEX JIT Stats";
-  const bool WinCollapsed = Collapsed[WIN_INDEX];
+  const bool WinCollapsed = g_stats->Collapsed[WIN_INDEX];
   if (!WinCollapsed) {
     //g_stats->WinStackMgr.RequestNewHeight(WIN_INDEX, 26);
   } else if (WinCollapsed) {
@@ -938,7 +939,7 @@ void HandleJITstats(WINDOW *win, void* user_data) {
   }
 
   box(win, 0, 0);
-  bool IsSelected = selected == WIN_INDEX;
+  bool IsSelected = g_stats->selected == WIN_INDEX;
   mvwprintw(win, 0, 1, "%lc %lc %s", Selected[IsSelected], CollapsedItem[WinCollapsed ? 1 : 0], WIN_NAME);
 
   char buffer[64];
@@ -1348,8 +1349,8 @@ std::pair<const char*, int> run_it(WINDOW* window, int pid) {
       AccumulateJITStats(JITData, Now);
     }
 
-    if (ToggleCollapsed) {
-      ToggleCollapsed = false;
+    if (g_stats->ToggleCollapsed) {
+      g_stats->ToggleCollapsed = false;
       g_stats->WinStackMgr.ClearWindowStack();
     }
     touchwin(window);
