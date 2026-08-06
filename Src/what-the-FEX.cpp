@@ -1182,13 +1182,19 @@ int user_select_pid(WINDOW *window) {
 
     if (selected < 0) {
       selected = 0;
-    } else if (selected >= max) {
+    } else if (max && selected >= max) {
       selected = max - 1;
     }
 
     return false;
   };
 
+  uint32_t Movement =
+    (uint32_t)'\\' << 24 |
+    (uint32_t)'|' << 16 |
+    (uint32_t)'/' << 8 |
+    (uint32_t)'-' << 0;
+  uint32_t RotateDivisor = 100;
   while (true) {
     touchwin(window);
 
@@ -1196,7 +1202,16 @@ int user_select_pid(WINDOW *window) {
 
     std::sort(info.begin(), info.end(), std::greater<PIDInfo>());
 
-    mvwprintw(window, 0, 0, "=== Select a PID ===");
+    if (info.empty()) {
+      mvwprintw(window, 0, 0, "=== No detected FEX === Scanning: %c%c%c%c", (char)(Movement >> 24), (char)(Movement >> 16), (char)(Movement >> 8), (char)(Movement >> 0) );
+      // Rotate
+      if (--RotateDivisor == 0) {
+        Movement = (Movement >> 8) | (Movement << 24);
+        RotateDivisor = 100;
+      }
+    } else {
+      mvwprintw(window, 0, 0, "=== Select a PID ===");
+    }
     for (size_t i = 0; i < info.size(); ++i) {
       mvwprintw(window, i + 1, 3, "PID: %8d: '%s'", info[i].pid, info[i].comm.c_str());
     }
@@ -1206,7 +1221,9 @@ int user_select_pid(WINDOW *window) {
     }
 
     // Move cursor
-    wmove(window, selected + 1, 1);
+    if (!info.empty()) {
+      wmove(window, selected + 1, 1);
+    }
 
     int c = wgetch(window);
     if (handle_key(c, info.size())) {
