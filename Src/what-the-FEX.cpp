@@ -569,8 +569,7 @@ bool HandleSelectMove(int c) {
     if (selected < 2) {
       ++selected;
     }
-  }
-  else if (c == KEY_RIGHT) {
+  } else if (c == '\r' || c == '\n' || c == ' ') {
     Collapsed[selected] ^= true;
     ToggleCollapsed = true;
   } else if (c == 'q' || c == 27) {
@@ -805,7 +804,11 @@ void HandleMemstats(WINDOW *win, void* user_data) {
   auto AppResident = g_stats->MemStats.TotalAppResident.load();
   const auto AppResidentName = ConvertMemToHuman(AppResident, 0);
   const auto AppResidentWithoutFEX = ConvertMemToHuman(AppResident - g_stats->MemStats.TotalAnon.load(), 0);
-  mvwprintw(win, 0, 1, "%lc %lc %s : Total app resident: %s (without FEX: %s)", Selected[IsSelected], CollapsedItem[WinCollapsed ? 1 : 0], WIN_NAME, AppResidentName.c_str(), AppResidentWithoutFEX.c_str());
+  if (WinCollapsed) {
+    mvwprintw(win, 0, 1, "%lc %lc %s : Memory scanning paused", Selected[IsSelected], CollapsedItem[WinCollapsed ? 1 : 0], WIN_NAME);
+  } else {
+    mvwprintw(win, 0, 1, "%lc %lc %s : Total app resident: %s (without FEX: %s)", Selected[IsSelected], CollapsedItem[WinCollapsed ? 1 : 0], WIN_NAME, AppResidentName.c_str(), AppResidentWithoutFEX.c_str());
+  }
 }
 
 struct JITStatsUserData {
