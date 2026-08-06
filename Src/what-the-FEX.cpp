@@ -1164,7 +1164,7 @@ int user_select_pid(WINDOW *window) {
       auto loaded = LoadFileToBuffer(procfs_path_comm, comm_name);
       if (loaded == -1) {
         // Okay, it doesn't exist? Just delete it to clean up.
-        std::filesystem::remove(path, ec);
+        std::filesystem::remove(Entry, ec);
         continue;
       }
       if (comm_name[loaded - 1] == '\n') {
